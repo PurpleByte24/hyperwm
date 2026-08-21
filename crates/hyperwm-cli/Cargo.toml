@@ -6,6 +6,7 @@ license.workspace = true
 description = "hyperwm CLI: talks to the running daemon over a Unix domain socket (reload, status, verify) plus install-keymap. Implemented starting in build unit 7."
 
 [dependencies]
+hyperwm-config = { path = "../hyperwm-config" }
 
 [[bin]]
 name = "hyperwm"

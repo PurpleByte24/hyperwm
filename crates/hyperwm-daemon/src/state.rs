@@ -5,12 +5,18 @@
 //! make either one visible on screen.
 //!
 //! `DaemonState` deliberately does *not* cache a "currently focused window"
-//! field -- [`DaemonState::resolve_focused`] queries the AX API live on
-//! every action, matching architecture.md §3.10's "query live, don't
-//! cache" rule for floating windows (extended here to focus in general,
-//! since the daemon has no `AXFocusedWindowChanged` subscription and no
-//! need for one: nothing here runs on a timer or needs focus between
-//! actions).
+//! field for hyper-key actions -- [`DaemonState::resolve_focused`] queries
+//! the AX API live for those, matching architecture.md §3.10's "query
+//! live, don't cache" rule for floating windows. Insertion is the
+//! exception: architecture.md §3.3 step 1 needs to know which *tiled*
+//! window was last focused, which a live query alone can't answer at the
+//! moment a new window is being inserted (AX focus may already have moved
+//! to that brand-new, not-yet-registered window by then). So
+//! `hyperwm-core`'s `Tree::set_focus`/`focus_history` *is* real state here,
+//! kept in sync continuously via `kAXFocusedWindowChangedNotification`
+//! (`lifecycle::adopt_app` watches it on every app;
+//! [`DaemonState::handle_focus_changed`] is the callback target) rather
+//! than only updated as a side effect of hyper-key actions.
 //!
 //! Creating a new per-app `AXObserver` needs a callback that can call back
 //! into a `DaemonState` behind a shared `Rc<RefCell<_>>` -- see
@@ -184,6 +190,26 @@ impl DaemonState {
         let id = self.windows.id_for(&window)?;
         self.tree.set_focus(Some(id));
         Some(id)
+    }
+
+    /// Keeps the tree's focus history up to date as focus actually
+    /// changes, via `kAXFocusedWindowChangedNotification`
+    /// (`lifecycle::adopt_app` watches it on every app). This is what
+    /// architecture.md §3.3 step 1's insertion rule actually needs:
+    /// `resolve_focused`'s live query alone isn't enough, because by the
+    /// time a new window's creation notification fires, AX focus may
+    /// already have moved to that brand-new (not-yet-registered) window,
+    /// which resolves to nothing -- and if focus was never tracked before
+    /// that moment either (e.g. several windows opened in a row with no
+    /// hyper-key press in between), there's nothing for insertion to fall
+    /// back to. `element` not resolving to a known [`WindowId`] (a
+    /// non-standard window that was filtered out, or focus landing on
+    /// nothing hyperwm tracks) clears `current_focus` rather than leaving
+    /// it stale, which is correct too: `Tree::set_focus(None)` doesn't
+    /// touch `focus_history`, so the insertion rule's fallback chain
+    /// still works exactly as architecture.md §3.3 step 1 describes.
+    pub(crate) fn handle_focus_changed(&mut self, element: &AXUIElement) {
+        self.tree.set_focus(self.windows.id_for(element));
     }
 
     /// Where a brand-new floating window with no prior position (a

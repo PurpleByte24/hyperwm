@@ -252,6 +252,23 @@ impl DaemonState {
         if self.windows.is_known(&window) || !Self::is_standard_window(&window) {
             return;
         }
+        // Sync the tree's notion of "focused" against live AX state
+        // *before* registering the new window, so architecture.md §3.3
+        // step 1's target-leaf selection reflects whichever *existing*
+        // tiled window the user was actually looking at, not whatever
+        // `current_focus`/`focus_history` last happened to hold from the
+        // most recent hyper-key action (nothing else updates them
+        // in between -- e.g. opening several windows in a row with no
+        // hyper-key press between them left focus stuck on the first
+        // window ever created, so every insertion kept splitting *its*
+        // leaf instead of whichever window was actually focused, and the
+        // other, undisturbed leaf just sat there never getting smaller).
+        // If the live-focused window turns out to be this brand new one
+        // (not registered yet, so unresolvable), `resolve_focused`
+        // leaves the tree's focus untouched rather than clearing it --
+        // which is what we want here too, since that's still whichever
+        // tiled window was focused right up until this one appeared.
+        let _ = self.resolve_focused();
         let id = self.windows.register(window.clone(), pid);
         self.watch(pid, &window, kAXUIElementDestroyedNotification);
 

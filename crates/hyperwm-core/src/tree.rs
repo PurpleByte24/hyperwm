@@ -469,18 +469,45 @@ impl Tree {
         }
     }
 
-    /// Resize (architecture.md §3.6): walks up from the focused leaf to the
-    /// nearest ancestor split whose axis matches `direction`, then adjusts
-    /// its ratio so the focused window grows toward `direction` and shrinks
-    /// away from it, regardless of whether it's that split's first or
-    /// second child. Returns `false` if `focused` isn't tiled or no
-    /// matching-axis ancestor exists.
+    /// Resize (architecture.md §3.6): walks up from the focused leaf to
+    /// find the ancestor split whose adjustment actually moves *focused's
+    /// own* edge in `direction`, and adjusts its ratio so focused grows
+    /// toward `direction`, shrinks away from it. Returns `false` if
+    /// `focused` isn't tiled or no matching-axis ancestor exists at all.
+    ///
+    /// "The ancestor split whose adjustment moves focused's edge" is not
+    /// simply "the nearest axis-matching ancestor, regardless of side" --
+    /// that was this method's original approach, and it's wrong whenever
+    /// two splits on the same axis are nested: picture `Root: Vertical(A:
+    /// Vertical(w1, w3), B: w2)`, i.e. w3 sits between w1 (left) and w2
+    /// (right), but is reached via *two* Vertical splits, not one. w3's
+    /// true right edge is the *outer* Root|B boundary (shared with w2);
+    /// its left edge (shared with w1) belongs to the *inner* A split.
+    /// "Nearest axis-matching ancestor" finds the inner split first and
+    /// stops there -- so resize-right on w3 would grow it by moving its
+    /// *left* edge into w1, not its right edge into w2: wider, but on the
+    /// wrong side (this reproduced exactly the "grows it in the opposite
+    /// direction" symptom from manual verification; see
+    /// `resize_nested_same_axis_split_picks_outer_boundary_not_inner`).
+    ///
+    /// The fix: a split's shared boundary is focused's own edge in
+    /// `direction` only when focused sits on the side that boundary is
+    /// *ahead of* for that direction -- First for Right/Down (First's far
+    /// edge is the boundary), Second for Left/Up (Second's near edge is
+    /// the boundary). So the walk up prefers the nearest axis-matching
+    /// ancestor where focused is on that side. If none exists anywhere on
+    /// the path (focused has no real edge to move that way at any level
+    /// -- e.g. it's flush against the screen edge, the `w1`/2-window case
+    /// covered by `resize_clamps_to_min_max_ratio`), it falls back to the
+    /// nearest axis-matching ancestor regardless of side, same as before:
+    /// a press still does something rather than a silent no-op whenever
+    /// any matching-axis split exists.
     ///
     /// # Panics
     ///
-    /// Never in practice: the internal `.unwrap()` only guards an invariant
-    /// that holds once `find_path` has confirmed `focused` is in this tree
-    /// (every prefix of its path then addresses a `Split`).
+    /// Never in practice: the internal `.unwrap()`s only guard an
+    /// invariant that holds once `find_path` has confirmed `focused` is
+    /// in this tree (every prefix of its path then addresses a `Split`).
     pub fn resize(
         &mut self,
         focused: WindowId,
@@ -505,28 +532,40 @@ impl Tree {
             Direction::Right | Direction::Down => 1.0,
             Direction::Left | Direction::Up => -1.0,
         };
+        let preferred_side = if base_sign > 0.0 { Side::First } else { Side::Second };
 
+        let mut fallback_depth = None;
+        let mut chosen_depth = None;
         for depth in (0..path.len()).rev() {
             let node = get_mut_at_path(self.root.as_mut().unwrap(), &path[..depth]);
-            let Node::Split {
-                direction: split_axis,
-                ratio,
-                ..
-            } = node
-            else {
+            let Node::Split { direction: split_axis, .. } = node else {
                 unreachable!("a path prefix always addresses a Split")
             };
             if *split_axis != required_axis {
                 continue;
             }
-            let side_sign: f64 = match path[depth] {
-                Side::First => 1.0,
-                Side::Second => -1.0,
-            };
-            *ratio = (*ratio + base_sign * side_sign * step).clamp(min_ratio, max_ratio);
-            return true;
+            if fallback_depth.is_none() {
+                fallback_depth = Some(depth);
+            }
+            if path[depth] == preferred_side {
+                chosen_depth = Some(depth);
+                break;
+            }
         }
-        false
+
+        let Some(depth) = chosen_depth.or(fallback_depth) else {
+            return false;
+        };
+        let node = get_mut_at_path(self.root.as_mut().unwrap(), &path[..depth]);
+        let Node::Split { ratio, .. } = node else {
+            unreachable!("a path prefix always addresses a Split")
+        };
+        let side_sign: f64 = match path[depth] {
+            Side::First => 1.0,
+            Side::Second => -1.0,
+        };
+        *ratio = (*ratio + base_sign * side_sign * step).clamp(min_ratio, max_ratio);
+        true
     }
 }
 
@@ -821,6 +860,29 @@ mod tests {
         assert!(!t.contains(w3));
     }
 
+    // Regression coverage for `examples/config.toml`'s actual default
+    // (max_tiled_windows = 4, not (e)'s max = 2): all 4 windows up to the
+    // cap must be accepted -- the 4th insertion (bringing the count from 3
+    // to 4) is still `Inserted`, only the 5th is `CapReached`.
+    #[test]
+    fn insert_accepts_windows_up_to_default_cap_of_four() {
+        let mut t = tree(4);
+        let (w1, w2, w3, w4, w5) = (id(1), id(2), id(3), id(4), id(5));
+        assert_eq!(t.insert(w1, SCREEN, NO_GAPS), InsertOutcome::Inserted);
+        t.set_focus(Some(w1));
+        assert_eq!(t.insert(w2, SCREEN, NO_GAPS), InsertOutcome::Inserted);
+        t.set_focus(Some(w1));
+        assert_eq!(t.insert(w3, SCREEN, NO_GAPS), InsertOutcome::Inserted);
+        t.set_focus(Some(w1));
+        assert_eq!(t.insert(w4, SCREEN, NO_GAPS), InsertOutcome::Inserted);
+        assert_eq!(t.tiled_count(), 4);
+        assert!(t.contains(w4));
+
+        assert_eq!(t.insert(w5, SCREEN, NO_GAPS), InsertOutcome::CapReached);
+        assert_eq!(t.tiled_count(), 4);
+        assert!(!t.contains(w5));
+    }
+
     // (f) Removal/collapse when a non-root leaf closes.
     #[test]
     fn remove_non_root_leaf_collapses_to_sibling() {
@@ -929,6 +991,120 @@ mod tests {
         assert!(t.resize(w2, Direction::Left, 0.1, 0.1, 0.9));
         let rects = t.layout(SCREEN, NO_GAPS);
         assert!((rect_of(&rects, w2).width - 320.0).abs() < 1e-9); // 800 * (1 - 0.6)
+    }
+
+    // Reproduces the "grows in the opposite direction" bug reported from
+    // manual verification: a *nested same-axis* split, where the nearest
+    // enclosing split matching the requested axis is NOT the one whose
+    // shared boundary is actually the focused window's edge in that
+    // direction.
+    //
+    // Tree shape (forced with `always_vertical` so two Vertical splits
+    // nest directly, which `aspect_ratio` can also produce on a wide
+    // enough screen/column -- this isn't a heuristic-specific bug):
+    //
+    //   Root: Vertical(ratio .5)
+    //   ├─ First: Vertical(ratio .5)     <- inner split
+    //   │   ├─ First:  w1  (x: 0-200)
+    //   │   └─ Second: w3  (x: 200-400)
+    //   └─ Second: w2  (x: 400-800)
+    //
+    // w3's *true* right edge is at x=400 (the outer Root split's
+    // boundary, shared with w2) -- w3 is the rightmost leaf of the whole
+    // left half. Its left edge (x=200, shared with w1) is the inner
+    // split's boundary. Pressing resize-right on w3 must move x=400
+    // rightward (into w2) via the *outer* split, not move x=200 leftward
+    // (into w1) via the inner one -- the latter is what the pre-fix code
+    // did: wider, but on the wrong side, exactly "grows it in the
+    // opposite direction."
+    #[test]
+    fn resize_nested_same_axis_split_picks_outer_boundary_not_inner() {
+        let mut t = Tree::new(4, InsertHeuristic::AlwaysVertical, 0.5);
+        let (w1, w2, w3) = (id(1), id(2), id(3));
+        t.insert(w1, SCREEN, NO_GAPS); // root
+        t.set_focus(Some(w1));
+        t.insert(w2, SCREEN, NO_GAPS); // Root: Vertical, w1 (First) | w2 (Second)
+        t.set_focus(Some(w1));
+        t.insert(w3, SCREEN, NO_GAPS); // w1 -> Vertical again: w1 (First) | w3 (Second)
+
+        let before = t.layout(SCREEN, NO_GAPS);
+        assert_eq!(rect_of(&before, w1), Rect { x: 0.0, y: 0.0, width: 200.0, height: 600.0 });
+        assert_eq!(rect_of(&before, w3), Rect { x: 200.0, y: 0.0, width: 200.0, height: 600.0 });
+        assert_eq!(rect_of(&before, w2), Rect { x: 400.0, y: 0.0, width: 400.0, height: 600.0 });
+
+        assert!(t.resize(w3, Direction::Right, 0.1, 0.1, 0.9));
+        let after = t.layout(SCREEN, NO_GAPS);
+        // The outer Root|w2 boundary moves right (400 -> 480 = 800*0.1
+        // more for the whole left group), at w2's expense -- the key
+        // property: w3's *right* edge (shared with w2) moved right, which
+        // is what "resize right" must do. w1 grows too (200 -> 240): it's
+        // proportionally rescaled along with w3 because both live inside
+        // the same outer branch whose share of the screen just grew --
+        // that's inherent to adjusting a ratio further up the tree, not a
+        // bug (architecture.md §3.6 adjusts one split's ratio, not a
+        // compensating cascade across multiple splits to hold siblings'
+        // absolute sizes fixed).
+        //
+        // Contrast with the pre-fix behavior: it adjusted the *inner*
+        // w1|w3 split instead (side_sign(Second) * base_sign(Right) =
+        // -1), which shrank w1 to 160 and grew w3 to 240 by moving w3's
+        // *left* edge from 200 to 160 -- while its right edge, shared
+        // with w2, stayed frozen at 400. Wider, but on the wrong side:
+        // exactly "grows it in the opposite direction."
+        assert_eq!(rect_of(&after, w1), Rect { x: 0.0, y: 0.0, width: 240.0, height: 600.0 });
+        assert_eq!(rect_of(&after, w3), Rect { x: 240.0, y: 0.0, width: 240.0, height: 600.0 });
+        assert_eq!(rect_of(&after, w2), Rect { x: 480.0, y: 0.0, width: 320.0, height: 600.0 });
+    }
+
+    // Same class of bug as the test above, but arising from the *default*
+    // `aspect_ratio` heuristic on a wide screen with a genuinely mixed
+    // 4-window layout (two Vertical splits nested, one Horizontal split
+    // mixed in) -- not a forced `always_vertical` config. Confirms the
+    // fix isn't specific to the synthetic all-vertical shape.
+    //
+    //   Root: Vertical(ratio .5)
+    //   ├─ First: Vertical(ratio .5)          <- inner, same axis as Root
+    //   │   ├─ First:  w1  (x:    0-600)
+    //   │   └─ Second: Horizontal(ratio .5)
+    //   │       ├─ First:  w3  (x: 600-1200, y:   0-450)
+    //   │       └─ Second: w4  (x: 600-1200, y: 450-900)
+    //   └─ Second: w2  (x: 1200-2400)
+    //
+    // w3's true right edge (x=1200) is the outer Root|w2 boundary, two
+    // levels up -- the nearest Vertical-axis ancestor (the inner split,
+    // one level up) is on the wrong side, same as above.
+    #[test]
+    fn resize_nested_same_axis_split_from_aspect_ratio_heuristic_on_wide_screen() {
+        let wide = Rect { x: 0.0, y: 0.0, width: 2400.0, height: 900.0 };
+        let mut t = tree(4);
+        let (w1, w2, w3, w4) = (id(1), id(2), id(3), id(4));
+        t.insert(w1, wide, NO_GAPS); // root
+        t.set_focus(Some(w1));
+        t.insert(w2, wide, NO_GAPS); // w1 (2400x900, wider) -> vertical: w1 | w2, 1200 each
+        t.set_focus(Some(w1));
+        t.insert(w3, wide, NO_GAPS); // w1 (1200x900, still wider) -> vertical again: w1 | w3, 600 each
+        t.set_focus(Some(w3));
+        t.insert(w4, wide, NO_GAPS); // w3 (600x900, taller) -> horizontal: w3 | w4, 450 each
+
+        let before = t.layout(wide, NO_GAPS);
+        assert_eq!(rect_of(&before, w1), Rect { x: 0.0, y: 0.0, width: 600.0, height: 900.0 });
+        assert_eq!(rect_of(&before, w3), Rect { x: 600.0, y: 0.0, width: 600.0, height: 450.0 });
+        assert_eq!(rect_of(&before, w4), Rect { x: 600.0, y: 450.0, width: 600.0, height: 450.0 });
+        assert_eq!(rect_of(&before, w2), Rect { x: 1200.0, y: 0.0, width: 1200.0, height: 900.0 });
+
+        assert!(t.resize(w3, Direction::Right, 0.1, 0.1, 0.9));
+        let after = t.layout(wide, NO_GAPS);
+        // Root ratio 0.5 -> 0.6: the left group's total width grows from
+        // 1200 to 1440, at w2's expense -- w1 and w4 grow alongside w3
+        // (same "adjusting one ratio scales its whole branch" reasoning
+        // as the test above), but the key property holds: w3's right
+        // edge (600+600=1200 before) moves to 720+720=1440, matching the
+        // group's new boundary -- not frozen in place the way the pre-fix
+        // code would have left it while shrinking w1 instead.
+        assert_eq!(rect_of(&after, w1), Rect { x: 0.0, y: 0.0, width: 720.0, height: 900.0 });
+        assert_eq!(rect_of(&after, w3), Rect { x: 720.0, y: 0.0, width: 720.0, height: 450.0 });
+        assert_eq!(rect_of(&after, w4), Rect { x: 720.0, y: 450.0, width: 720.0, height: 450.0 });
+        assert_eq!(rect_of(&after, w2), Rect { x: 1440.0, y: 0.0, width: 960.0, height: 900.0 });
     }
 
     #[test]

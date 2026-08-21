@@ -1,0 +1,15 @@
+[package]
+name = "hyperwm-daemon"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Event Router + Action Engine daemon: wires hyperkey events and config-driven keybinds to hyperwm-core tree operations and real AX window moves. Implemented starting in build unit 5."
+
+[dependencies]
+hyperwm-core = { path = "../hyperwm-core" }
+hyperwm-config = { path = "../hyperwm-config" }
+hyperwm-macos = { path = "../hyperwm-macos" }
+
+[[bin]]
+name = "hyperwm-daemon"
+path = "src/main.rs"

@@ -1,0 +1,9 @@
+[package]
+name = "hyperwm-config"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Parsing and validation of config.toml, matching examples/config.toml's schema. Implemented in build unit 2."
+
+[dependencies]
+hyperwm-core = { path = "../hyperwm-core" }

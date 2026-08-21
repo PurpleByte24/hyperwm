@@ -1,0 +1,14 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/hyperwm-core",
+    "crates/hyperwm-macos",
+    "crates/hyperwm-config",
+    "crates/hyperwm-daemon",
+    "crates/hyperwm-cli",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "MIT"

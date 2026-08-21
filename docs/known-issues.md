@@ -73,3 +73,53 @@ should decide whether to:
 This is a decision for that unit, not resolved here -- flagging it now
 per CLAUDE.md's instruction to report AX resize/move quirks as soon as
 they're found rather than discovering them later.
+
+## Build unit 5: known limitations of the daemon wiring
+
+Recorded at implementation time (2026-08-21), not yet confirmed or
+contradicted by manual verification.
+
+**Single global tree, not one tree per macOS Space.** architecture.md §3.1
+scopes one BSP tree per Space. There is no public API to learn which Space
+(or which display, for multi-monitor setups where displays have separate
+Spaces) a given window belongs to -- the private `CGSCopySpacesForWindows`
+family is the only way, and CLAUDE.md's hard constraints rule out private
+APIs. `hyperwm-daemon` therefore runs exactly one tree for the whole
+session, laid out against whichever display its own tiled windows are
+currently on (falls back to the primary display if the tree is empty). On
+a single-display machine this matches the spec exactly. With multiple
+displays or multiple Spaces in use, expect best-effort behavior, not
+per-Space isolation -- this wasn't a choice among equally-valid options,
+it's what's left once private APIs are off the table.
+
+**AppKit dependency beyond the literal "AX + CGEventTap only" wording.**
+Two things architecture.md needs have no CoreGraphics/Accessibility-only
+public API: the Dock/menu-bar-aware "visible frame" (§4's gaps math) and
+learning that a new app has launched, in order to attach an `AXObserver`
+to it (§3.10's "always observed" lifecycle rule). Both are available only
+through AppKit (`NSScreen.visibleFrame`, `NSWorkspace`'s launch
+notification) -- fully public, documented APIs, but outside CLAUDE.md's
+literal two-API list. Confirmed with the user before adding
+`objc2`/`objc2-app-kit`/`objc2-foundation`/`block2` to `hyperwm-macos`
+(see `crates/hyperwm-macos/src/screen.rs` and `src/workspace.rs`'s module
+docs for the specifics) rather than deciding unilaterally.
+
+**Per-app `AXObserver`s aren't cleaned up when an app quits.** Each pid
+gets one `AXObserver` (`DaemonState::app_observers`), created once and
+never removed, even after every window it watched has closed and the
+process has terminated. This doesn't cause incorrect behavior (a dead
+pid's observer just never fires again), but it's an unbounded-over-a-long-
+enough-session resource leak. `NSWorkspace` also offers a
+`didTerminateApplicationNotification` that could drive cleanup
+symmetrically with the launch-notification adoption path; not implemented
+in this unit for scope reasons.
+
+**Cascade placement's pixel step is an implementation default, not a
+config value.** `floating.new_float_placement = "cascade"`
+(architecture.md §3.9, examples/config.toml) specifies the strategy
+("offset from the previous floating window's position") but not a pixel
+amount. `hyperwm-daemon` uses a fixed 32px step, wrapping after 8 windows,
+as an internal constant (`state.rs`'s `CASCADE_STEP`/`CASCADE_WRAP`) --
+this is implementation-level judgment, not a config-schema decision, so it
+wasn't raised as a question, but it's worth knowing about if cascade
+placement looks off during manual verification.

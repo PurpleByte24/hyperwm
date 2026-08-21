@@ -9,6 +9,9 @@ description = "Event Router + Action Engine daemon: wires hyperkey events and co
 hyperwm-core = { path = "../hyperwm-core" }
 hyperwm-config = { path = "../hyperwm-config" }
 hyperwm-macos = { path = "../hyperwm-macos" }
+accessibility-sys = "0.2.0"
+core-graphics = "0.25.0"
+core-foundation = "0.10.1"
 
 [[bin]]
 name = "hyperwm-daemon"

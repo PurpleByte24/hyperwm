@@ -71,7 +71,7 @@ use std::process::ExitCode;
 use std::rc::Rc;
 
 use core_foundation::runloop::CFRunLoop;
-use hyperwm_macos::{ax, hyperkey, keycode, permissions, workspace};
+use hyperwm_macos::{hyperkey, keycode, permissions, workspace};
 
 use router::Router;
 use state::DaemonState;
@@ -141,7 +141,13 @@ fn main() -> ExitCode {
         "hyperwm-daemon: registering already-running apps' windows (left floating -- \
          hyper+f to tile one; only windows opened from here on tile automatically)"
     );
-    for pid in ax::all_app_pids() {
+    // Every running app, not just ones with an on-screen window right now
+    // (ax::all_app_pids) -- an app that's running but currently
+    // windowless (Finder with no Finder windows open is the common case)
+    // needs an AXObserver attached now too, or its first window later
+    // would never be observed at all (see workspace::all_running_app_pids
+    // doc for the full explanation).
+    for pid in workspace::all_running_app_pids() {
         lifecycle::adopt_app(&state, pid, lifecycle::AdoptionPolicy::FloatOnly);
     }
 

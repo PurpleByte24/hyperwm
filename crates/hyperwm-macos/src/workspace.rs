@@ -10,6 +10,18 @@
 //! `screen.rs`'s NSScreen use, since it's the same "AppKit, not literally
 //! AX + CGEventTap" tradeoff.
 //!
+//! [`all_running_app_pids`] covers a gap the launch notification and
+//! `ax::all_app_pids` (`CGWindowListCopyWindowInfo`, scoped to apps with an
+//! on-screen window right now) leave open: an app that's already running
+//! but has zero windows open at daemon startup (Finder with no Finder
+//! windows open is the common case -- it's essentially always running)
+//! never appears in either -- not `ax::all_app_pids` (no window to be
+//! found), not the launch notification (it didn't just launch). Its
+//! *first* window, opened any time after, would then never be observed at
+//! all: nothing ever created an `AXObserver` for its pid. Enumerating
+//! every running application (not just ones with windows) at startup and
+//! adopting each closes this.
+//!
 //! The notification block runs on whichever thread posts it; in practice
 //! that's the main thread's run loop in the common modes, which is also
 //! where this daemon pumps its `CGEventTap` and `AXObserver` sources, so no
@@ -71,4 +83,23 @@ pub fn watch_app_launches(on_launch: impl Fn(pid_t) + 'static) -> AppLaunchWatch
         )
     };
     AppLaunchWatcher { observer }
+}
+
+/// pids of every currently running application (per `NSWorkspace`, which
+/// -- unlike raw process enumeration -- is already scoped to actual
+/// user-facing applications, not arbitrary background processes),
+/// regardless of whether any of them currently has an open window. See
+/// the module doc for why daemon startup needs this instead of (or
+/// alongside) `ax::all_app_pids`.
+#[must_use]
+pub fn all_running_app_pids() -> Vec<pid_t> {
+    // `.to_vec()`, not `.iter()`: the latter needs the "NSEnumerator"
+    // feature, which nothing else here pulls in (see screen.rs's
+    // `to_vec()` use for the same reason).
+    NSWorkspace::sharedWorkspace()
+        .runningApplications()
+        .to_vec()
+        .into_iter()
+        .map(|app| app.processIdentifier())
+        .collect()
 }

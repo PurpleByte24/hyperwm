@@ -1,0 +1,13 @@
+# Rust
+/target/
+**/target/
+Cargo.lock.bak
+
+# Editor/OS
+.DS_Store
+.idea/
+.vscode/
+*.swp
+
+# Local dev artifacts
+*.log

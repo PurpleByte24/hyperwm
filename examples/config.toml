@@ -1,0 +1,143 @@
+# hyperwm example configuration
+#
+# Location: ~/.config/hyperwm/config.toml (preferred) or ~/.hyperwm/config.toml
+# (fallback). If both exist, ~/.config/hyperwm/config.toml wins.
+#
+# This file is the frozen schema reference — see docs/architecture.md for the
+# behavioral rules each field controls. Run `hyperwm verify` after editing to
+# validate syntax, values, and script references before reloading.
+
+# ─────────────────────────────────────────────────────────────────────────
+# Hyperkey
+# ─────────────────────────────────────────────────────────────────────────
+[hyperkey]
+
+# The keycode the daemon watches as the hyper modifier. This assumes Caps
+# Lock has already been remapped to this key at the system level — either
+# manually via System Settings > Keyboard > Keyboard Shortcuts > Modifier
+# Keys, or via `hyperwm install-keymap` (which shells out to hidutil).
+#
+# The daemon does not perform the remap itself and does not implement any
+# caps-lock-toggle or hold-duration logic. Caps Lock's native function is
+# gone once remapped — this is a plain single-keycode modifier watch.
+#
+# Valid values: any CGKeyCode name known to hyperwm. "f18" is the convention
+# (no physical Mac keyboard has this key, so it's always free).
+watch_keycode = "f18"
+
+# ─────────────────────────────────────────────────────────────────────────
+# Tiling
+# ─────────────────────────────────────────────────────────────────────────
+[tiling]
+
+# Maximum number of windows the BSP tree manages at once. Windows beyond
+# this count are automatically floated (not an error, not user-visible as
+# unusual — see architecture.md §3.2). Once floated for this reason, a
+# window does not automatically return to tiled if space frees up; the user
+# must manually toggle it back with hyper+f.
+max_tiled_windows = 4
+
+# Default split ratio (0.0–1.0) applied when a leaf is split to insert a new
+# tiled window. 0.5 = even split. This is the *starting* ratio; hyper+shift+
+# hjkl adjusts it per-split afterward (see [tiling.resize] below).
+split_ratio_default = 0.5
+
+# How split direction is chosen when a new window is inserted into the tree.
+#
+#   "aspect_ratio"     (default) — split vertical (left/right) if the target
+#                       leaf's current rect is wider than tall; split
+#                       horizontal (top/bottom) if taller than wide.
+#   "always_vertical"  — always split left/right.
+#   "always_horizontal"— always split top/bottom.
+insert_heuristic = "aspect_ratio"
+
+[tiling.resize]
+# Percentage-point step applied to a split's ratio per hyper+shift+hjkl
+# press. e.g. 0.05 = 5 percentage points per press.
+step = 0.05
+
+# Ratio is clamped to [min, max] to prevent degenerate/zero-size panes.
+min_ratio = 0.1
+max_ratio = 0.9
+
+# ─────────────────────────────────────────────────────────────────────────
+# Gaps
+# ─────────────────────────────────────────────────────────────────────────
+[gaps]
+
+# Pixels between tiled window edges and the screen's visible frame (i.e.
+# excluding menu bar / Dock). Also respected by hyper+m maximize.
+outer = 12
+
+# Pixels between adjacent tiled windows. Applied as a half-gap on each side
+# of a split boundary, so adjacent windows end up exactly `inner` px apart
+# (not inner * 2).
+inner = 8
+
+# ─────────────────────────────────────────────────────────────────────────
+# Floating
+# ─────────────────────────────────────────────────────────────────────────
+[floating]
+
+# Apps whose windows are never inserted into the tiling tree, regardless of
+# max_tiled_windows headroom. Bundle ID is preferred (reliable, unambiguous);
+# plain app name is accepted for convenience but matches on window owner
+# name and can be ambiguous if multiple apps share a display name.
+#
+# Find a bundle ID with: `osascript -e 'id of app "App Name"'`
+always_float_apps = [
+  "com.apple.systempreferences", # System Settings
+  "com.1password.1password",     # 1Password
+  "com.apple.calculator",        # Calculator
+]
+
+# Placement strategy for a window that becomes floating and has no prior
+# position to restore (e.g. a brand-new window from an always_float app).
+#
+#   "cascade" (default) — offset from the previous floating window's
+#                          position, so overlapping windows stay visually
+#                          distinguishable.
+#   "center"             — centered on its display.
+new_float_placement = "cascade"
+
+# Pixel step for hyper+hjkl nudges on a focused floating window. This is a
+# fixed positional nudge, unrelated to the tree's geometric neighbor-swap
+# logic used for tiled windows (see architecture.md §3.7).
+float_move_step = 40
+
+# ─────────────────────────────────────────────────────────────────────────
+# Keybinds — built-in actions
+# ─────────────────────────────────────────────────────────────────────────
+# Format: "hyper+<key>" = "<action>"
+# All entries below are hyper-prefixed; hyperwm does not support non-hyper
+# global keybinds in v1 (avoids conflicting with normal app shortcuts).
+[keybinds]
+"hyper+f" = "toggle_float"     # tiled <-> floating (architecture.md §3.8)
+"hyper+m" = "maximize"         # fill display minus gaps.outer; not persistent state
+
+"hyper+h" = "move_left"        # geometric neighbor swap (architecture.md §3.5)
+"hyper+j" = "move_down"
+"hyper+k" = "move_up"
+"hyper+l" = "move_right"
+
+"hyper+shift+h" = "resize_left"   # adjust nearest enclosing split's ratio
+"hyper+shift+j" = "resize_down"
+"hyper+shift+k" = "resize_up"
+"hyper+shift+l" = "resize_right"
+
+# ─────────────────────────────────────────────────────────────────────────
+# Scripts
+# ─────────────────────────────────────────────────────────────────────────
+[scripts]
+# Directory containing user scripts, resolved relative to this config
+# file's own directory unless given as an absolute path. Default resolves
+# to ~/.config/hyperwm/scripts/.
+dir = "scripts"
+
+# Format: "hyper+<key>" = "<script-filename>"
+# Filename must exist in [scripts].dir and be executable (checked by
+# `hyperwm verify`). Scripts are spawned detached — the daemon does not
+# wait for them to finish. stderr and non-zero exit codes are logged.
+[keybinds.scripts]
+"hyper+g" = "toggle_ghostty.sh"
+"hyper+n" = "new_note.sh"

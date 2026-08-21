@@ -23,13 +23,23 @@
 //! ```
 //!
 //! against `examples/config.toml` copied to `~/.config/hyperwm/config.toml`
-//! (or your own, matching its schema), with a few ordinary app windows
-//! already open. First run triggers the Accessibility/Input Monitoring
-//! prompts; grant both and re-run. Then, with several windows open:
+//! (or your own, matching its schema). First run triggers the
+//! Accessibility/Input Monitoring prompts; grant both and re-run.
+//!
+//! Windows already open when the daemon starts are registered but left
+//! floating, not auto-tiled (`lifecycle::AdoptionPolicy::FloatOnly`) --
+//! including whatever terminal you ran `cargo run` from. Only windows
+//! opened *after* the daemon starts go through the normal tile-or-float
+//! rule. So: start the daemon first, *then* open the windows you're
+//! testing with (e.g. `open -na TextEdit --args --new` a few times) to
+//! exercise `max_tiled_windows` cleanly -- otherwise whatever was already
+//! on screen won't count toward it, which will look like tiling capacity
+//! going missing if you don't account for it.
 //!
 //! - `hyper+f` on a tiled window floats it in place (no jump); on a
 //!   floating window, tiles it (unless `max_tiled_windows` is already
-//!   reached, in which case it stays floating).
+//!   reached, in which case it stays floating). This is also how to bring
+//!   a pre-existing (startup-adopted) window into the tree.
 //! - `hyper+m` fills the focused window's display, inset by `gaps.outer`;
 //!   works on tiled or floating windows. On a tiled window, the *next*
 //!   `hyper+f`/`hyper+hjkl`/new-window event should snap it back to its
@@ -127,14 +137,19 @@ fn main() -> ExitCode {
     let router = Router::build(&config);
     let state = Rc::new(RefCell::new(DaemonState::new(config)));
 
-    println!("hyperwm-daemon: adopting already-running apps' windows");
+    println!(
+        "hyperwm-daemon: registering already-running apps' windows (left floating -- \
+         hyper+f to tile one; only windows opened from here on tile automatically)"
+    );
     for pid in ax::all_app_pids() {
-        lifecycle::adopt_app(&state, pid);
+        lifecycle::adopt_app(&state, pid, lifecycle::AdoptionPolicy::FloatOnly);
     }
 
     let launch_watcher = {
         let state = Rc::clone(&state);
-        workspace::watch_app_launches(move |pid| lifecycle::adopt_app(&state, pid))
+        workspace::watch_app_launches(move |pid| {
+            lifecycle::adopt_app(&state, pid, lifecycle::AdoptionPolicy::ClassifyForTiling);
+        })
     };
 
     println!(

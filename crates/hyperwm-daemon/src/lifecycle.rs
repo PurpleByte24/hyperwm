@@ -9,14 +9,23 @@
 //!
 //! [`adopt_app`] is called for every pid owning an on-screen window at
 //! daemon startup, and again from `hyperwm_macos::workspace`'s
-//! newly-launched-app notification. Both cases are handled identically:
-//! ensure an `AXObserver` exists for the pid (creating one the first
-//! time), then run every one of that app's *current* windows through
-//! [`DaemonState::handle_new_window`] if hyperwm hasn't seen them yet.
-//! Folding "catch up on existing windows" into every call (not just the
-//! startup one) is what closes the race where an app's first window is
-//! already open by the time its launch notification arrives and this
-//! function gets to attach a `kAXWindowCreatedNotification` observer.
+//! newly-launched-app notification. Both cases ensure an `AXObserver`
+//! exists for the pid (creating one the first time), then run every one
+//! of that app's *current* windows through [`DaemonState`] if hyperwm
+//! hasn't seen them yet -- catching up on existing windows on *every*
+//! call, not just the startup one, is what closes the race where an
+//! app's first window is already open by the time its launch
+//! notification arrives and this function gets to attach a
+//! `kAXWindowCreatedNotification` observer.
+//!
+//! The two call sites differ in [`AdoptionPolicy`]: a window discovered
+//! because its app just launched is genuinely new activity and gets
+//! tiled or floated per architecture.md §3.2/§3.3/§3.9's normal rule
+//! (`ClassifyForTiling`); a window discovered at the one-time startup
+//! scan already existed before the daemon did, so it's registered but
+//! left floating (`FloatOnly`) -- otherwise whatever's on screen when the
+//! daemon starts (e.g. the terminal it was launched from) would silently
+//! occupy `max_tiled_windows` slots the user never asked to tile.
 
 use std::cell::RefCell;
 use std::rc::Rc;
@@ -29,7 +38,21 @@ use hyperwm_macos::ax::{AXNotification, AXUIElement, WindowObserver};
 
 use crate::state::DaemonState;
 
-pub fn adopt_app(state: &Rc<RefCell<DaemonState>>, pid: pid_t) {
+/// How to treat the windows [`adopt_app`] finds already open for `pid`
+/// (see this module's doc comment for the rationale).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AdoptionPolicy {
+    /// Run each window through the normal tile-or-float insertion rule
+    /// (architecture.md §3.2/§3.3/§3.9) -- for an app that just launched
+    /// during the daemon's own run.
+    ClassifyForTiling,
+    /// Register each window for lifecycle tracking but leave it floating,
+    /// without spending a `max_tiled_windows` slot -- for the app
+    /// already-running at daemon startup.
+    FloatOnly,
+}
+
+pub fn adopt_app(state: &Rc<RefCell<DaemonState>>, pid: pid_t, policy: AdoptionPolicy) {
     let already_watched = state.borrow().app_observers.contains_key(&pid);
     if !already_watched {
         let callback_state = Rc::clone(state);
@@ -59,9 +82,13 @@ pub fn adopt_app(state: &Rc<RefCell<DaemonState>>, pid: pid_t) {
         return;
     };
     for window in windows {
-        // `handle_new_window` no-ops on a window it's already registered,
-        // so no need to pre-check membership here too.
-        state.borrow_mut().handle_new_window(pid, window);
+        // Both branches no-op on a window already registered, so no need
+        // to pre-check membership here too.
+        let mut state = state.borrow_mut();
+        match policy {
+            AdoptionPolicy::ClassifyForTiling => state.handle_new_window(pid, window),
+            AdoptionPolicy::FloatOnly => state.adopt_preexisting_window(pid, window),
+        }
     }
 }
 

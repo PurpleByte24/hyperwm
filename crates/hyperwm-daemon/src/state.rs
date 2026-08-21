@@ -201,11 +201,37 @@ impl DaemonState {
         self.place_new_float(window);
     }
 
+    /// Registers a window hyperwm is only now finding out about *without*
+    /// running it through the tile-or-float insertion rule -- used
+    /// exclusively for `lifecycle::adopt_app`'s one-time startup scan of
+    /// windows that existed before the daemon itself did (see
+    /// `lifecycle::AdoptionPolicy::FloatOnly`'s doc comment for why: a
+    /// window the user had open before starting hyperwm isn't a "new
+    /// window" in architecture.md §3.3's sense, and force-tiling it would
+    /// silently spend a `max_tiled_windows` slot the user never asked
+    /// for -- e.g. the terminal the daemon itself was launched from).
+    /// Still registers for lifecycle tracking (destroy watched, same as
+    /// any window) and keeps its current rect, same "no jump" rule as
+    /// `toggle_float`'s tiled->floating transition -- this isn't a "new
+    /// float with no prior position" either, so `place_new_float` doesn't
+    /// apply.
+    pub(crate) fn adopt_preexisting_window(&mut self, pid: pid_t, window: AXUIElement) {
+        if self.windows.is_known(&window) {
+            return;
+        }
+        let id = self.windows.register(window.clone(), pid);
+        self.watch(pid, &window, kAXUIElementDestroyedNotification);
+        self.floating.push(id);
+    }
+
     /// New-window insertion (architecture.md §3.3, §3.2, §3.9). Called
     /// both for a live `kAXWindowCreatedNotification` and for
-    /// `lifecycle::adopt_app`'s startup/catch-up enumeration of windows
-    /// that already existed -- both are "a window hyperwm hasn't seen
-    /// before", and architecture.md doesn't distinguish them.
+    /// `lifecycle::adopt_app`'s catch-up enumeration of a *newly launched*
+    /// app's windows (`AdoptionPolicy::ClassifyForTiling`) -- both are
+    /// genuinely new activity during the daemon's own lifetime, which is
+    /// what architecture.md §3.3's insertion rule describes. Pre-existing
+    /// windows at daemon startup go through
+    /// [`DaemonState::adopt_preexisting_window`] instead, not this.
     pub(crate) fn handle_new_window(&mut self, pid: pid_t, window: AXUIElement) {
         if self.windows.is_known(&window) {
             return;

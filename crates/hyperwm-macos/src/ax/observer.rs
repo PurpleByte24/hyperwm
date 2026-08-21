@@ -18,7 +18,7 @@ use accessibility_sys::{
     AXObserverGetRunLoopSource, AXObserverRef, AXUIElementRef,
 };
 use core_foundation::base::{CFRelease, CFTypeRef, TCFType};
-use core_foundation::runloop::{kCFRunLoopDefaultMode, CFRunLoop, CFRunLoopSource};
+use core_foundation::runloop::{kCFRunLoopCommonModes, CFRunLoop, CFRunLoopSource};
 use core_foundation::string::{CFString, CFStringRef};
 
 use super::AXUIElement;
@@ -107,16 +107,25 @@ impl WindowObserver {
         }
     }
 
-    /// Adds this observer's run loop source to the current thread's
-    /// `CFRunLoop` and runs it forever, delivering notifications to the
-    /// callback given to [`WindowObserver::new`] as they arrive. Does not
-    /// return under normal operation -- mirrors
-    /// [`crate::hyperkey::watch`]'s blocking pattern.
-    pub fn run(&self) -> ! {
+    /// Adds this observer's run loop source to the *current* thread's
+    /// `CFRunLoop` (in `kCFRunLoopCommonModes`, so it keeps firing
+    /// alongside other sources sharing that loop -- e.g. hyperwm-daemon's
+    /// `hyperkey` tap and other apps' `WindowObserver`s). Does not block;
+    /// the caller runs the loop itself (e.g. `CFRunLoop::run_current()`)
+    /// once every source it needs is attached.
+    pub fn attach_to_current_runloop(&self) {
         let source_ref = unsafe { AXObserverGetRunLoopSource(self.observer) };
         let source = unsafe { CFRunLoopSource::wrap_under_get_rule(source_ref) };
         let run_loop = CFRunLoop::get_current();
-        run_loop.add_source(&source, unsafe { kCFRunLoopDefaultMode });
+        run_loop.add_source(&source, unsafe { kCFRunLoopCommonModes });
+    }
+
+    /// Convenience for standalone callers (e.g. this crate's manual
+    /// verification examples) that only ever watch one observer: attaches
+    /// to the current run loop, then blocks on it forever. Does not
+    /// return under normal operation.
+    pub fn run(&self) -> ! {
+        self.attach_to_current_runloop();
         CFRunLoop::run_current();
         unreachable!("CFRunLoopRun does not return")
     }

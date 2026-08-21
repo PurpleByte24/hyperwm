@@ -13,6 +13,6 @@ mod app;
 mod element;
 mod observer;
 
-pub use app::{frontmost_app_pid, pid_for_app_name};
+pub use app::{all_app_pids, frontmost_app_pid, pid_for_app_name};
 pub use element::AXUIElement;
 pub use observer::{AXNotification, ObserverCreationError, WindowObserver};

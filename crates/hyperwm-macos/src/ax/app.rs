@@ -79,3 +79,21 @@ pub fn pid_for_app_name(name: &str) -> Option<pid_t> {
         .find(|w| w.owner_name.eq_ignore_ascii_case(name))
         .map(|w| w.owner_pid)
 }
+
+/// Distinct pids owning at least one normal on-screen window, in
+/// front-to-back order with duplicates removed (first occurrence kept).
+/// Used at daemon startup to attach a `kAXWindowCreatedNotification`
+/// observer to every already-running app (architecture.md §3.10 requires
+/// lifecycle observation for windows from apps that were already running,
+/// not just ones launched afterward -- see `hyperwm_macos::workspace` for
+/// that half).
+#[must_use]
+pub fn all_app_pids() -> Vec<pid_t> {
+    let mut seen = Vec::new();
+    for w in normal_on_screen_windows() {
+        if !seen.contains(&w.owner_pid) {
+            seen.push(w.owner_pid);
+        }
+    }
+    seen
+}

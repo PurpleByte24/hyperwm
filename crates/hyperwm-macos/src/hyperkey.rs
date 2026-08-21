@@ -5,11 +5,25 @@
 //! machine: each event is handled independently, nothing is remembered
 //! between calls.
 //!
-//! This module only watches and reports. Swallowing non-matching key
-//! events while hyper-active, and dispatching them to the Event Router, is
-//! wired up starting in build unit 5 -- every event is passed through
-//! unchanged here.
+//! While hyper-active, every other key event is intercepted here and
+//! reported to the caller instead of reaching the focused application
+//! (architecture.md §2.2) -- this module owns the swallow/pass-through
+//! decision (it's the only thing that can, since only the tap callback
+//! gets to return a `CallbackResult`), but the Event Router (build unit
+//! 5, in hyperwm-daemon) owns keybind lookup: this module has no notion of
+//! `hyperwm_config::Keybind` or actions, it just reports raw
+//! keycode/shift-flag pairs.
+//!
+//! [`install`] attaches the tap to the *current* thread's `CFRunLoop` and
+//! returns immediately with a guard, rather than blocking -- unlike the
+//! rest of build unit 3, which had this module block forever on its own
+//! run loop as the only source running. Build unit 5's daemon also needs
+//! to pump `AXObserver` sources (unit 4) and an `NSWorkspace` notification
+//! (this crate's `workspace` module) on that same run loop, so ownership
+//! of "run the loop" moved to the daemon's `main`, which adds every
+//! source first and then makes the one blocking call.
 
+use std::cell::Cell;
 use std::fmt;
 
 use core_foundation::runloop::{kCFRunLoopCommonModes, CFRunLoop};
@@ -23,7 +37,7 @@ use crate::keycode::CGKeyCode;
 /// The `CGEventTap` could not be created. In practice this means Input
 /// Monitoring permission is missing or was revoked after startup --
 /// [`crate::permissions::check`] should be used to give the user a clearer
-/// diagnosis before calling [`watch`].
+/// diagnosis before calling [`install`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct TapCreationError;
 
@@ -38,13 +52,35 @@ impl fmt::Display for TapCreationError {
 
 impl std::error::Error for TapCreationError {}
 
-/// Creates the event tap watching `watch_keycode`, enables it on the
-/// current thread's `CFRunLoop`, and then runs that run loop forever --
-/// this call does not return under normal operation.
+/// A key event while hyper-active, reported instead of being forwarded to
+/// the focused application. `shift` is the physical Shift key's live state
+/// (`hyperwm_config::Keybind`'s `shift` modifier), not a separate watched
+/// keycode.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct HyperKeyEvent {
+    pub keycode: CGKeyCode,
+    pub shift: bool,
+}
+
+/// Keeps the `CGEventTap` alive and enabled for as long as this is held;
+/// dropping it disables and releases the tap (via `CGEventTap`'s own
+/// `Drop`).
+pub struct HyperkeyWatcher {
+    _tap: CGEventTap<'static>,
+}
+
+/// Creates the event tap watching `watch_keycode` and attaches it to the
+/// *current* thread's `CFRunLoop` in `kCFRunLoopCommonModes`, enabled
+/// immediately. Does not block -- the caller is responsible for running
+/// that run loop (e.g. `CFRunLoop::run_current()`), typically after
+/// attaching other sources too.
 ///
-/// `on_change(true)` fires on key down of `watch_keycode`, `on_change(false)`
-/// on key up. Every event (matching or not) is passed through unmodified;
-/// this build unit only observes.
+/// `on_active_changed(true)` fires on key down of `watch_keycode`,
+/// `on_active_changed(false)` on key up. `on_key` fires for every *other*
+/// key-down event while hyper-active is true; that event (and every other
+/// key event, up or down, while hyper-active) is swallowed rather than
+/// forwarded, per architecture.md §2.2 -- `on_key`'s return value doesn't
+/// control this, there is no "unbound key" pass-through case.
 ///
 /// # Errors
 ///
@@ -52,11 +88,13 @@ impl std::error::Error for TapCreationError {}
 /// Input Monitoring permission is missing. Check
 /// [`crate::permissions::check`] first so that case has already been
 /// explained to the user.
-pub fn watch(
+pub fn install(
     watch_keycode: CGKeyCode,
-    on_change: impl Fn(bool) + Send + 'static,
-) -> Result<(), TapCreationError> {
+    on_active_changed: impl Fn(bool) + Send + 'static,
+    on_key: impl Fn(HyperKeyEvent) + Send + 'static,
+) -> Result<HyperkeyWatcher, TapCreationError> {
     let watch_keycode = i64::from(watch_keycode);
+    let hyper_active = Cell::new(false);
 
     let tap = CGEventTap::new(
         CGEventTapLocation::HID,
@@ -67,11 +105,32 @@ pub fn watch(
             let keycode = event.get_integer_value_field(EventField::KEYBOARD_EVENT_KEYCODE);
             if keycode == watch_keycode {
                 match event_type {
-                    CGEventType::KeyDown => on_change(true),
-                    CGEventType::KeyUp => on_change(false),
+                    CGEventType::KeyDown => {
+                        hyper_active.set(true);
+                        on_active_changed(true);
+                    }
+                    CGEventType::KeyUp => {
+                        hyper_active.set(false);
+                        on_active_changed(false);
+                    }
                     _ => {}
                 }
+                return CallbackResult::Drop;
             }
+
+            if hyper_active.get() {
+                if matches!(event_type, CGEventType::KeyDown) {
+                    let shift = event
+                        .get_flags()
+                        .contains(core_graphics::event::CGEventFlags::CGEventFlagShift);
+                    on_key(HyperKeyEvent {
+                        keycode: keycode as CGKeyCode,
+                        shift,
+                    });
+                }
+                return CallbackResult::Drop;
+            }
+
             CallbackResult::Keep
         },
     )
@@ -84,6 +143,6 @@ pub fn watch(
     let run_loop = CFRunLoop::get_current();
     run_loop.add_source(&source, unsafe { kCFRunLoopCommonModes });
     tap.enable();
-    CFRunLoop::run_current();
-    Ok(())
+
+    Ok(HyperkeyWatcher { _tap: tap })
 }

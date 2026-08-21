@@ -6,4 +6,7 @@ license.workspace = true
 description = "macOS integration: CGEventTap hyperkey watcher and Accessibility API window manipulation. Implemented in build units 3-4."
 
 [dependencies]
+accessibility-sys = "0.2"
+core-foundation = "0.10"
+core-graphics = "0.25"
 hyperwm-core = { path = "../hyperwm-core" }

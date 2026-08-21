@@ -34,7 +34,9 @@ use accessibility_sys::pid_t;
 use block2::RcBlock;
 use objc2::rc::Retained;
 use objc2::runtime::ProtocolObject;
-use objc2_app_kit::{NSRunningApplication, NSWorkspace, NSWorkspaceApplicationKey};
+use objc2_app_kit::{
+    NSApplicationActivationPolicy, NSRunningApplication, NSWorkspace, NSWorkspaceApplicationKey,
+};
 use objc2_foundation::{NSNotification, NSObjectProtocol};
 
 /// Keeps the `NSWorkspace` launch observer registered for as long as this
@@ -85,12 +87,21 @@ pub fn watch_app_launches(on_launch: impl Fn(pid_t) + 'static) -> AppLaunchWatch
     AppLaunchWatcher { observer }
 }
 
-/// pids of every currently running application (per `NSWorkspace`, which
-/// -- unlike raw process enumeration -- is already scoped to actual
-/// user-facing applications, not arbitrary background processes),
+/// pids of every currently running application with a UI presence --
+/// `NSApplicationActivationPolicy::Regular` (Dock icon, normal windows)
+/// or `Accessory` (menu-bar-style, but can still show windows/panels) --
 /// regardless of whether any of them currently has an open window. See
 /// the module doc for why daemon startup needs this instead of (or
 /// alongside) `ax::all_app_pids`.
+///
+/// Excludes `Prohibited` (pure background processes: XPC services, login
+/// items, helper/agent processes) -- `NSWorkspace.runningApplications` is
+/// already scoped to actual applications rather than arbitrary processes,
+/// but still includes plenty of these with zero UI and no AX support at
+/// all. Adopting them wastes an `AXObserverCreate` call each (observed in
+/// manual testing: a couple dozen `kAXErrorCannotComplete`/
+/// `kAXErrorAPIDisabled`/etc. lines at startup, one per such pid) for
+/// something that can never have a window worth tiling.
 #[must_use]
 pub fn all_running_app_pids() -> Vec<pid_t> {
     // `.to_vec()`, not `.iter()`: the latter needs the "NSEnumerator"
@@ -100,6 +111,7 @@ pub fn all_running_app_pids() -> Vec<pid_t> {
         .runningApplications()
         .to_vec()
         .into_iter()
+        .filter(|app| app.activationPolicy() != NSApplicationActivationPolicy::Prohibited)
         .map(|app| app.processIdentifier())
         .collect()
 }

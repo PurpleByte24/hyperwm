@@ -21,8 +21,9 @@
 use std::collections::HashMap;
 
 use accessibility_sys::{
-    kAXFocusedWindowAttribute, kAXUIElementDestroyedNotification, kAXWindowMovedNotification,
-    kAXWindowResizedNotification, pid_t,
+    kAXFocusedWindowAttribute, kAXStandardWindowSubrole, kAXSubroleAttribute,
+    kAXUIElementDestroyedNotification, kAXWindowMovedNotification, kAXWindowResizedNotification,
+    pid_t,
 };
 use core_graphics::geometry::{CGPoint, CGSize};
 
@@ -83,6 +84,21 @@ impl DaemonState {
             windows: WindowRegistry::default(),
             app_observers: HashMap::new(),
         }
+    }
+
+    /// Filters out AX elements that report as "windows" via
+    /// `kAXWindowsAttribute`/`kAXWindowCreatedNotification` but aren't
+    /// real, user-manageable app windows -- confirmed via manual testing's
+    /// debug dump, which showed Notification Centre widget panels
+    /// (180x180/360x360 "windows") and several 64x64 phantom entries all
+    /// getting registered and tiled alongside real windows, each
+    /// insertion re-splitting the tree (shrinking everything) on every
+    /// one. `kAXSubroleAttribute == AXStandardWindow` is the standard
+    /// public-API filter tiling window managers use for exactly this: a
+    /// real document/app window has this subrole; panels, sheets, system
+    /// dialogs, and other AX-reported pseudo-windows generally don't.
+    fn is_standard_window(window: &AXUIElement) -> bool {
+        window.string_attribute(kAXSubroleAttribute).as_deref() == Ok(kAXStandardWindowSubrole)
     }
 
     fn watch(&self, pid: pid_t, window: &AXUIElement, notification: &str) {
@@ -216,7 +232,7 @@ impl DaemonState {
     /// float with no prior position" either, so `place_new_float` doesn't
     /// apply.
     pub(crate) fn adopt_preexisting_window(&mut self, pid: pid_t, window: AXUIElement) {
-        if self.windows.is_known(&window) {
+        if self.windows.is_known(&window) || !Self::is_standard_window(&window) {
             return;
         }
         let id = self.windows.register(window.clone(), pid);
@@ -233,7 +249,7 @@ impl DaemonState {
     /// windows at daemon startup go through
     /// [`DaemonState::adopt_preexisting_window`] instead, not this.
     pub(crate) fn handle_new_window(&mut self, pid: pid_t, window: AXUIElement) {
-        if self.windows.is_known(&window) {
+        if self.windows.is_known(&window) || !Self::is_standard_window(&window) {
             return;
         }
         let id = self.windows.register(window.clone(), pid);

@@ -1,7 +1,8 @@
-//! macOS integration. Build unit 3 (this): `CGEventTap` hyperkey watcher +
-//! Accessibility/Input Monitoring permission checks. AX window
-//! manipulation lands in build unit 4 (see CLAUDE.md build order).
+//! macOS integration. Build unit 3: `CGEventTap` hyperkey watcher +
+//! Accessibility/Input Monitoring permission checks. Build unit 4 (this):
+//! AX API window manipulation, in [`ax`].
 
+pub mod ax;
 pub mod hyperkey;
 pub mod keycode;
 pub mod permissions;

@@ -1,0 +1,8 @@
+[package]
+name = "hyperwm-core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Platform-independent BSP tiling algorithm: tree, insertion, removal, directional movement, resize. No macOS dependencies — operates purely on synthetic window rects."
+
+[dependencies]

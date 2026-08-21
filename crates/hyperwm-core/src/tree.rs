@@ -471,37 +471,51 @@ impl Tree {
 
     /// Resize (architecture.md §3.6): walks up from the focused leaf to
     /// find the ancestor split whose adjustment actually moves *focused's
-    /// own* edge in `direction`, and adjusts its ratio so focused grows
-    /// toward `direction`, shrinks away from it. Returns `false` if
-    /// `focused` isn't tiled or no matching-axis ancestor exists at all.
+    /// own* edge in `direction`, and pushes that split's shared boundary
+    /// in `direction`. Returns `false` if `focused` isn't tiled or no
+    /// matching-axis ancestor exists at all.
     ///
-    /// "The ancestor split whose adjustment moves focused's edge" is not
-    /// simply "the nearest axis-matching ancestor, regardless of side" --
-    /// that was this method's original approach, and it's wrong whenever
-    /// two splits on the same axis are nested: picture `Root: Vertical(A:
-    /// Vertical(w1, w3), B: w2)`, i.e. w3 sits between w1 (left) and w2
-    /// (right), but is reached via *two* Vertical splits, not one. w3's
-    /// true right edge is the *outer* Root|B boundary (shared with w2);
-    /// its left edge (shared with w1) belongs to the *inner* A split.
-    /// "Nearest axis-matching ancestor" finds the inner split first and
-    /// stops there -- so resize-right on w3 would grow it by moving its
-    /// *left* edge into w1, not its right edge into w2: wider, but on the
-    /// wrong side (this reproduced exactly the "grows it in the opposite
-    /// direction" symptom from manual verification; see
-    /// `resize_nested_same_axis_split_picks_outer_boundary_not_inner`).
+    /// `ratio` is literally "how far across the split, left to right (or
+    /// top to bottom), the shared boundary sits" -- `Direction::Right`/
+    /// `Down` always pushes it further that way (`ratio` increases),
+    /// `Left`/`Up` always pushes it the other way (`ratio` decreases).
+    /// That's the *entire* rule for which way the number moves; there is
+    /// deliberately no dependency on which side (first/second child)
+    /// `focused` is on. Whether that reads as "focused grows" or "focused
+    /// shrinks" falls out naturally from which side of the boundary it's
+    /// on -- First's far edge is the boundary, so pushing it away
+    /// (Right/Down) grows First and shrinks Second; Second's near edge is
+    /// the boundary, so pushing it away (Left/Up) grows Second and
+    /// shrinks First. An earlier version of this method multiplied in an
+    /// extra sign based on `focused`'s side, meant to make "focused
+    /// grows" hold regardless of side -- that's wrong: it made
+    /// Left/Right's effect depend on which side of the split focused was
+    /// on, so the *same keypress* grew a window on one side and shrank
+    /// the identical-looking window on the other (confirmed against
+    /// manual testing: hyper+shift+h on a right-side window grew its
+    /// neighbor instead of it, and hyper+shift+l shrank it instead of
+    /// growing it -- see `resize_second_child_grows_toward_its_own_edge`,
+    /// which replaced a test of the same shape that had asserted the old,
+    /// backwards behavior).
     ///
-    /// The fix: a split's shared boundary is focused's own edge in
-    /// `direction` only when focused sits on the side that boundary is
-    /// *ahead of* for that direction -- First for Right/Down (First's far
-    /// edge is the boundary), Second for Left/Up (Second's near edge is
-    /// the boundary). So the walk up prefers the nearest axis-matching
-    /// ancestor where focused is on that side. If none exists anywhere on
-    /// the path (focused has no real edge to move that way at any level
-    /// -- e.g. it's flush against the screen edge, the `w1`/2-window case
-    /// covered by `resize_clamps_to_min_max_ratio`), it falls back to the
-    /// nearest axis-matching ancestor regardless of side, same as before:
+    /// Picking *which* split to push is a separate concern from the sign
+    /// above, and still matters: a split's shared boundary is only
+    /// focused's own edge in `direction` when focused sits on the side
+    /// that boundary is *ahead of* for that direction -- First for
+    /// Right/Down, Second for Left/Up. Two splits on the same axis can
+    /// nest (`Root: Vertical(A: Vertical(w1, w3), B: w2)`), and the
+    /// *nearest* axis-matching ancestor isn't always the right one: w3's
+    /// true right edge is the *outer* Root|B boundary, not the *inner*
+    /// A's w1|w3 boundary. So the walk up prefers the nearest
+    /// axis-matching ancestor where focused is on the correct side for
+    /// `direction`; if none exists anywhere on the path (focused has no
+    /// real edge to move that way at any level -- e.g. it's flush against
+    /// the screen edge, the `w1`/2-window case in
+    /// `resize_first_child_falls_back_to_only_available_split`), it falls
+    /// back to the nearest axis-matching ancestor regardless of side, so
     /// a press still does something rather than a silent no-op whenever
-    /// any matching-axis split exists.
+    /// any matching-axis split exists (`resize_clamps_to_min_max_ratio`
+    /// covers this fallback case).
     ///
     /// # Panics
     ///
@@ -560,11 +574,7 @@ impl Tree {
         let Node::Split { ratio, .. } = node else {
             unreachable!("a path prefix always addresses a Split")
         };
-        let side_sign: f64 = match path[depth] {
-            Side::First => 1.0,
-            Side::Second => -1.0,
-        };
-        *ratio = (*ratio + base_sign * side_sign * step).clamp(min_ratio, max_ratio);
+        *ratio = (*ratio + base_sign * step).clamp(min_ratio, max_ratio);
         true
     }
 }
@@ -966,8 +976,10 @@ mod tests {
         t.set_focus(Some(w1));
         t.insert(w2, SCREEN, NO_GAPS); // vertical: w1 (first/left) | w2 (second/right)
 
-        // w1 is the first child: resize_left shrinks it (base_sign(-1) *
-        // side_sign(first=+1) = -1 per the ratio each press).
+        // w1 is the first child, so it's the *preferred* split for
+        // Direction::Left too (there's nothing else to fall back to in a
+        // 2-window tree): pressing Left always decreases the ratio, and
+        // decreasing the first child's share shrinks it.
         for _ in 0..20 {
             t.resize(w1, Direction::Left, 0.1, 0.1, 0.9);
         }
@@ -975,22 +987,37 @@ mod tests {
         assert!((rect_of(&rects, w1).width - 80.0).abs() < 1e-9); // 800 * 0.1
     }
 
+    // w2 (second child) pressing Left is the *preferred* case for that
+    // direction (Second's near edge -- its own left edge -- is this
+    // split's shared boundary): the boundary moves left, growing w2. This
+    // replaced a test that asserted the opposite (w2 shrinking to 320) --
+    // that was the pre-fix "side_sign" bug: it made resize's grow/shrink
+    // outcome depend on which side of the split focused was on, so
+    // hyper+shift+h on a right-side window grew its *neighbor* instead of
+    // it. See Tree::resize's doc comment for the full story.
     #[test]
-    fn resize_second_child_sign_is_mirrored() {
+    fn resize_second_child_grows_toward_its_own_edge() {
         let mut t = tree(4);
         let (w1, w2) = (id(1), id(2));
         t.insert(w1, SCREEN, NO_GAPS);
         t.set_focus(Some(w1));
         t.insert(w2, SCREEN, NO_GAPS); // vertical: w1 (first) | w2 (second)
 
-        // w2 is the second child: the sign flips relative to a first-child
-        // resize. base_sign(Left) = -1, side_sign(Second) = -1, so the
-        // ratio (first child's share) *increases* by step here, same
-        // direction key as first_child_resize_shrinks_it but opposite
-        // effect on the ratio itself.
         assert!(t.resize(w2, Direction::Left, 0.1, 0.1, 0.9));
         let rects = t.layout(SCREEN, NO_GAPS);
-        assert!((rect_of(&rects, w2).width - 320.0).abs() < 1e-9); // 800 * (1 - 0.6)
+        // Ratio (first child's share) decreases 0.5 -> 0.4, so w2 (second)
+        // grows from 400 to 480 -- its own left edge moved left.
+        assert!((rect_of(&rects, w1).width - 320.0).abs() < 1e-9); // 800 * 0.4
+        assert!((rect_of(&rects, w2).width - 480.0).abs() < 1e-9); // 800 * 0.6
+
+        // Direction::Right on w2 is the *fallback* case (w2 has no right-
+        // adjacent boundary at all -- it's flush against the screen edge):
+        // the ratio still just increases (base_sign alone, no side
+        // dependence), shrinking w2 back toward its original size.
+        assert!(t.resize(w2, Direction::Right, 0.1, 0.1, 0.9));
+        let rects = t.layout(SCREEN, NO_GAPS);
+        assert!((rect_of(&rects, w1).width - 400.0).abs() < 1e-9);
+        assert!((rect_of(&rects, w2).width - 400.0).abs() < 1e-9);
     }
 
     // Reproduces the "grows in the opposite direction" bug reported from

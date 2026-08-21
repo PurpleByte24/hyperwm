@@ -223,6 +223,60 @@ belonging to these apps are never inserted into the tiling tree, regardless
 of `max_tiled_windows` headroom. New windows from these apps go straight to
 the floating list using `floating.new_float_placement` (`cascade` | `center`).
 
+### 3.10 Externally-triggered geometry changes (manual drag/resize)
+
+This section defines how the daemon reacts when a window's position or size
+changes by a means other than hyperwm itself issuing the change (e.g. the
+user drags or resizes a window by hand with the mouse).
+
+**Tiled windows: the tree is authoritative, and drift is corrected
+immediately.** The daemon subscribes to `AXWindowMoved`/`AXWindowResized`
+notifications for tiled windows specifically in order to detect drift from
+the tree's computed rect and correct it right away — not to track or cache
+the window's live position. On each such notification:
+
+1. Compare the window's current on-screen rect to the rect the tree says it
+   should have.
+2. If they differ, issue a corrective `set_position`/`set_size` call back to
+   the tree's rect.
+3. If they already match (e.g. a redundant notification from the same
+   settled position), do nothing — no-op, not a repeated write.
+
+A single drag gesture produces a burst of `AXWindowMoved` notifications (one
+per intermediate frame of the drag, observed in practice to be on the order
+of 10+ events for a short drag). This is expected AX behavior, not a bug.
+The daemon must **deduplicate by comparing against the target rect** (step 3
+above), not by time-based debouncing — a timer-based approach introduces a
+window during which the daemon is knowingly stale, which solves nothing.
+Comparing current-vs-target on every event and only acting when they differ
+is correct regardless of how many redundant events arrive, and requires no
+timing assumptions.
+
+Net effect: dragging a tiled window snaps it back at or near real-time
+(bounded by however quickly AX delivers the notification burst), not on the
+next unrelated hyperkey action. This matches the behavior of established
+tools in this space (e.g. yabai) and is the intended, opinionated feel of
+hyperwm's tiling mode — a tiled window's position is not something the user
+is meant to permanently change by dragging.
+
+**Floating windows: no tracking, no caching — query live, on demand.**
+The daemon does **not** subscribe to `AXWindowMoved`/`AXWindowResized` for
+floating windows, and does not maintain a cached copy of a floating window's
+position/size anywhere in its state. Whenever a floating window's current
+geometry is needed for an operation (e.g. `hyper+f` toggling it back to
+tiled, `hyper+m` maximizing it and later restoring), the daemon queries the
+window's live position/size via AX **at the moment it's needed**, using the
+same `position()`/`size()` calls unit 4 provides. This sidesteps staleness
+entirely: there is no cache to go stale, because nothing is cached.
+
+**Window lifecycle (`AXWindowCreated` / `AXUIElementDestroyed`) is always
+observed**, for both tiled and floating windows, regardless of the above —
+this is how the tree's insertion (§3.3) and removal (§3.4) rules get
+triggered by real window creation/destruction, independent of whether the
+change originated from a hyperkey action or externally (e.g. the user opens
+a new document window, or quits an app). This is not optional and is
+unaffected by the tiled/floating distinction above.
+
 ---
 
 ## 4. Gaps

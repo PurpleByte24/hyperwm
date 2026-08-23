@@ -233,35 +233,41 @@ This section defines how the daemon reacts when a window's position or size
 changes by a means other than hyperwm itself issuing the change (e.g. the
 user drags or resizes a window by hand with the mouse).
 
-**Tiled windows: the tree is authoritative, and drift is corrected
-immediately.** The daemon subscribes to `AXWindowMoved`/`AXWindowResized`
-notifications for tiled windows specifically in order to detect drift from
-the tree's computed rect and correct it right away — not to track or cache
-the window's live position. On each such notification:
+**Tiled windows: the tree is authoritative, and drift is corrected once the
+mouse button is released — never while it's held.** The daemon subscribes to
+`AXWindowMoved`/`AXWindowResized` notifications for tiled windows
+specifically in order to detect drift from the tree's computed rect and
+correct it, and separately watches the left mouse button's own down/up state
+via a `CGEventTap` (`ListenOnly` — it never intercepts or alters a
+click/drag, purely observes). The two combine as follows:
 
-1. Compare the window's current on-screen rect to the rect the tree says it
-   should have.
-2. If they differ, issue a corrective `set_position`/`set_size` call back to
-   the tree's rect.
-3. If they already match (e.g. a redundant notification from the same
-   settled position), do nothing — no-op, not a repeated write.
+1. While the left mouse button is down, every `AXWindowMoved`/
+   `AXWindowResized` notification is ignored outright — no comparison, no
+   write, not even a queued correction. The window is free to move/resize
+   exactly as the user drags it, with no fighting.
+2. The instant the button is released, sweep every currently tiled window
+   once: compare its current on-screen rect to the rect the tree says it
+   should have, and issue a corrective `set_position`/`set_size` call back to
+   the tree's rect for any that differ. A window whose rect already matches
+   (e.g. no drag touched it) is left untouched — no-op, not a redundant
+   write.
+3. Outside of an active drag (button up throughout), correction still
+   happens on every `AXWindowMoved`/`AXWindowResized` notification,
+   comparing current-vs-target and writing back only on a mismatch — this
+   covers geometry changes that aren't a hand drag at all (e.g. another
+   process repositioning a window). The daemon must **deduplicate by
+   comparing against the target rect**, not by time-based debouncing — a
+   timer-based approach introduces a window during which the daemon is
+   knowingly stale, which solves nothing.
 
-A single drag gesture produces a burst of `AXWindowMoved` notifications (one
-per intermediate frame of the drag, observed in practice to be on the order
-of 10+ events for a short drag). This is expected AX behavior, not a bug.
-The daemon must **deduplicate by comparing against the target rect** (step 3
-above), not by time-based debouncing — a timer-based approach introduces a
-window during which the daemon is knowingly stale, which solves nothing.
-Comparing current-vs-target on every event and only acting when they differ
-is correct regardless of how many redundant events arrive, and requires no
-timing assumptions.
-
-Net effect: dragging a tiled window snaps it back at or near real-time
-(bounded by however quickly AX delivers the notification burst), not on the
-next unrelated hyperkey action. This matches the behavior of established
-tools in this space (e.g. yabai) and is the intended, opinionated feel of
-hyperwm's tiling mode — a tiled window's position is not something the user
-is meant to permanently change by dragging.
+Net effect: dragging or resizing a tiled window moves/resizes it freely for
+as long as the button is held, then snaps to its tree rect the instant the
+button comes up — not mid-drag, and not deferred to the next unrelated
+hyperkey action either. This is a deliberate v1 revision from the daemon's
+first cut (which corrected on every notification with no mouse-state gate at
+all, fighting slower drags before release): a tiled window's position is
+still not something the user is meant to permanently change by dragging, but
+the correction should never visibly contest the drag itself.
 
 **Floating windows: no tracking, no caching — query live, on demand.**
 The daemon does **not** subscribe to `AXWindowMoved`/`AXWindowResized` for

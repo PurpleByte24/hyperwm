@@ -28,6 +28,7 @@ pub mod ax;
 pub mod hyperkey;
 pub mod identity;
 pub mod keycode;
+pub mod mouse;
 pub mod permissions;
 pub mod screen;
 pub mod workspace;

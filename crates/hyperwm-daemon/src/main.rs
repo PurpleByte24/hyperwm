@@ -1,12 +1,13 @@
 //! Wires the four subsystems together (architecture.md §1): loads config,
-//! checks permissions, then attaches the hyperkey watcher (unit 3), an
-//! `AXObserver` per already-running app (unit 4, via `lifecycle`) and an
-//! `NSWorkspace` watcher for apps launched afterward, all to *one* shared
-//! `CFRunLoop` -- and only then makes the single blocking call that runs
-//! it. Everything from here on is event-driven: the Event Router
-//! (`router`) resolves a keypress to an `Action`, the Action Engine
-//! (`state::DaemonState`) carries it out against real `hyperwm-core` tree
-//! state and real AX window calls.
+//! checks permissions, then attaches the hyperkey watcher (unit 3), a
+//! left-mouse-button watcher (`hyperwm_macos::mouse`, architecture.md
+//! §3.10), an `AXObserver` per already-running app (unit 4, via
+//! `lifecycle`) and an `NSWorkspace` watcher for apps launched afterward,
+//! all to *one* shared `CFRunLoop` -- and only then makes the single
+//! blocking call that runs it. Everything from here on is event-driven:
+//! the Event Router (`router`) resolves a keypress to an `Action`, the
+//! Action Engine (`state::DaemonState`) carries it out against real
+//! `hyperwm-core` tree state and real AX window calls.
 //!
 //! Script keybinds and CLI reload (`hyperwm reload`/`status`/`verify`) are
 //! later build units (6-7), not wired here.
@@ -57,9 +58,11 @@
 //! - Closing a tiled window should collapse its sibling into its place
 //!   (architecture.md §3.4); closing the last tiled window empties the
 //!   tree.
-//! - Dragging a *tiled* window by hand should snap back to its tree rect
-//!   at or near real-time (architecture.md §3.10); dragging a *floating*
-//!   window should just stay where you drop it.
+//! - Dragging or resizing a *tiled* window by hand should **not** snap
+//!   back while the mouse button is still held -- it should move/resize
+//!   freely -- then snap to its tree rect the moment the button is
+//!   released (architecture.md §3.10). Dragging a *floating* window
+//!   should just stay where you drop it, no correction ever.
 
 mod lifecycle;
 mod registry;
@@ -71,7 +74,7 @@ use std::process::ExitCode;
 use std::rc::Rc;
 
 use core_foundation::runloop::CFRunLoop;
-use hyperwm_macos::{hyperkey, keycode, permissions, workspace};
+use hyperwm_macos::{hyperkey, keycode, mouse, permissions, workspace};
 
 use router::Router;
 use state::DaemonState;
@@ -188,14 +191,37 @@ fn main() -> ExitCode {
         }
     };
 
+    // Drives DaemonState::set_mouse_down (architecture.md §3.10): pauses
+    // drift correction while the left mouse button is held (an
+    // in-progress hand drag/resize), resumes as one corrective sweep on
+    // release. `ListenOnly`, so this can never intercept or alter a
+    // click/drag itself -- see hyperwm_macos::mouse's module doc.
+    let mouse_dispatch = AssertSend(Rc::clone(&state));
+    let mouse_watcher = mouse::install(move |down| {
+        let AssertSend(state) = &mouse_dispatch;
+        state.borrow_mut().set_mouse_down(down);
+    });
+    let mouse_watcher = match mouse_watcher {
+        Ok(watcher) => watcher,
+        Err(err) => {
+            eprintln!(
+                "hyperwm-daemon: {err} -- was reported granted at startup, so try restarting \
+                 the daemon, or re-check System Settings > Privacy & Security > Input \
+                 Monitoring"
+            );
+            return ExitCode::FAILURE;
+        }
+    };
+
     println!("hyperwm-daemon: running");
     CFRunLoop::run_current();
 
     // Unreachable under normal operation (the run loop above never
-    // returns); keeps `watcher`/`launch_watcher` alive for the daemon's
-    // entire lifetime instead of being dropped (and disabled) right after
-    // `install`/`watch_app_launches` return.
+    // returns); keeps `watcher`/`launch_watcher`/`mouse_watcher` alive for
+    // the daemon's entire lifetime instead of being dropped (and
+    // disabled) right after `install`/`watch_app_launches` return.
     drop(watcher);
     drop(launch_watcher);
+    drop(mouse_watcher);
     ExitCode::SUCCESS
 }

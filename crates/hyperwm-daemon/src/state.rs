@@ -68,6 +68,11 @@ pub struct DaemonState {
     /// every method here that needs a *new* notification watched on an
     /// already-known pid just calls `.watch()` on the existing entry.
     pub(crate) app_observers: HashMap<pid_t, WindowObserver>,
+    /// Left-mouse-button state, driven by `hyperwm_macos::mouse::install`'s
+    /// tap via [`DaemonState::set_mouse_down`] (architecture.md §3.10).
+    /// `handle_drift` no-ops entirely while this is `true`, rather than
+    /// fighting an in-progress hand drag/resize.
+    mouse_down: bool,
 }
 
 impl DaemonState {
@@ -83,6 +88,7 @@ impl DaemonState {
             tree,
             floating: Vec::new(),
             windows: WindowRegistry::default(),
+            mouse_down: false,
             app_observers: HashMap::new(),
         }
     }
@@ -301,8 +307,14 @@ impl DaemonState {
     /// compares the window's live rect to the tree's computed rect and
     /// only writes back if they differ, so a burst of redundant
     /// notifications from one drag settles into a single corrective write
-    /// (or none) rather than N repeated ones.
+    /// (or none) rather than N repeated ones. No-ops entirely while
+    /// [`DaemonState::mouse_down`] is `true` -- correction resumes as one
+    /// sweep when [`DaemonState::set_mouse_down`] sees the button
+    /// released, rather than fighting an in-progress hand drag/resize.
     pub(crate) fn handle_drift(&mut self, element: &AXUIElement) {
+        if self.mouse_down {
+            return;
+        }
         let Some(id) = self.windows.id_for(element) else {
             return;
         };
@@ -320,6 +332,37 @@ impl DaemonState {
         let Some((_, target)) = rects.into_iter().find(|(rid, _)| *rid == id) else {
             return;
         };
+        Self::correct_if_drifted(element, target);
+    }
+
+    /// Left-mouse-button state (architecture.md §3.10), driven by
+    /// `hyperwm_macos::mouse::install`'s tap. On release (`down ==
+    /// false`), sweeps every currently tiled window once so whatever
+    /// drifted during the drag/resize -- which `handle_drift` ignored
+    /// entirely while the button was held -- gets corrected in one shot,
+    /// regardless of which window(s) the drag actually touched.
+    pub(crate) fn set_mouse_down(&mut self, down: bool) {
+        self.mouse_down = down;
+        if !down {
+            self.correct_all_tiled_drift();
+        }
+    }
+
+    fn correct_all_tiled_drift(&self) {
+        let Some(visible) = self.current_tree_visible_frame() else {
+            return;
+        };
+        for (id, target) in self.tree.layout(visible, self.config.gaps) {
+            if let Some(element) = self.windows.element_for(id) {
+                Self::correct_if_drifted(element, target);
+            }
+        }
+    }
+
+    /// Architecture.md §3.10 steps 1-3: compares `element`'s live rect to
+    /// `target` and writes back only if they differ by more than
+    /// `DRIFT_EPSILON`.
+    fn correct_if_drifted(element: &AXUIElement, target: Rect) {
         let (Ok(pos), Ok(size)) = (element.position(), element.size()) else {
             return;
         };

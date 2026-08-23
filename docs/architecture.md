@@ -118,11 +118,15 @@ list carrying position, size, and z-order.
 Applies only when current tiled count < `max_tiled_windows` and the window is
 not in `always_float_apps`.
 
-1. Locate the **leaf holding the currently focused tiled window**. If no
-   tiled window is currently focused (e.g. focus is on a float, or this is
-   the very first window), fall back to the most-recently-focused tiled leaf;
-   if none exists (tree is empty), the new window becomes the tree's sole
-   leaf (root).
+1. Locate the **tiled leaf with the largest on-screen area** (`width *
+   height` of its current on-screen rect). If the tree is empty, the new
+   window becomes the tree's sole leaf (root) instead. **Tie-break** (exact
+   area tie): pick the candidate with the lowest internal window ID (same
+   convention as §3.5 step 5 — stable, deterministic, never ambiguous to the
+   program). This rule is deliberately **not** focus-based: it doesn't matter
+   which window the user last focused, only which pane currently has the
+   most space to give up — so a sequence of new windows self-balances toward
+   roughly equal panes regardless of click/focus order.
 2. Split that leaf. The leaf's window becomes one child, the new window
    becomes the other child (new window is placed as `second`, i.e.
    right/bottom, by default).

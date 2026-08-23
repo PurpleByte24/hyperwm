@@ -31,9 +31,8 @@ use std::cell::RefCell;
 use std::rc::Rc;
 
 use accessibility_sys::{
-    kAXFocusedWindowChangedNotification, kAXUIElementDestroyedNotification,
-    kAXWindowCreatedNotification, kAXWindowMovedNotification, kAXWindowResizedNotification,
-    kAXWindowsAttribute, pid_t,
+    kAXUIElementDestroyedNotification, kAXWindowCreatedNotification, kAXWindowMovedNotification,
+    kAXWindowResizedNotification, kAXWindowsAttribute, pid_t,
 };
 use hyperwm_macos::ax::{AXNotification, AXUIElement, WindowObserver};
 
@@ -64,28 +63,6 @@ pub fn adopt_app(state: &Rc<RefCell<DaemonState>>, pid: pid_t, policy: AdoptionP
                 if let Err(err) = observer.watch(&app_element, kAXWindowCreatedNotification) {
                     eprintln!(
                         "hyperwm-daemon: couldn't watch window creation for pid {pid}: {}",
-                        accessibility_sys::error_string(err)
-                    );
-                }
-                // architecture.md §3.3 step 1's insertion target depends
-                // on which *existing* tiled window was last focused --
-                // DaemonState only ever learns that during a hyper-key
-                // action otherwise, so without this, opening several
-                // windows in a row with no hyper-key press in between
-                // left the tree's notion of "focused" stuck whenever it
-                // was last set (or never set at all), and every insertion
-                // fell back to the tree's own last-resort default
-                // (lowest WindowId) instead of the actually-focused
-                // window (confirmed in manual testing: it kept splitting
-                // "the first window detected"'s leaf regardless of which
-                // window was actually focused). Watching this keeps
-                // DaemonState::handle_focus_changed feeding real focus
-                // changes to the tree continuously, not just at the
-                // moment a new window happens to be inserted.
-                if let Err(err) = observer.watch(&app_element, kAXFocusedWindowChangedNotification)
-                {
-                    eprintln!(
-                        "hyperwm-daemon: couldn't watch focus changes for pid {pid}: {}",
                         accessibility_sys::error_string(err)
                     );
                 }
@@ -125,7 +102,5 @@ fn dispatch_notification(state: &Rc<RefCell<DaemonState>>, event: AXNotification
         state.borrow_mut().handle_window_destroyed(&event.element);
     } else if name == kAXWindowMovedNotification || name == kAXWindowResizedNotification {
         state.borrow_mut().handle_drift(&event.element);
-    } else if name == kAXFocusedWindowChangedNotification {
-        state.borrow_mut().handle_focus_changed(&event.element);
     }
 }

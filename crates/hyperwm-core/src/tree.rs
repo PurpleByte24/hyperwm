@@ -170,13 +170,6 @@ pub struct Tree {
     max_tiled_windows: usize,
     insert_heuristic: InsertHeuristic,
     split_ratio_default: f64,
-    /// The window currently focused, tiled or not (may be `None`, or a
-    /// floating window not present in this tree at all).
-    current_focus: Option<WindowId>,
-    /// Tiled windows this tree has seen focused, most-recent-first. Used by
-    /// the insertion rule's fallback chain (architecture.md §3.3 step 1) and
-    /// pruned whenever a window leaves the tree.
-    focus_history: Vec<WindowId>,
 }
 
 impl Tree {
@@ -191,8 +184,6 @@ impl Tree {
             max_tiled_windows,
             insert_heuristic,
             split_ratio_default,
-            current_focus: None,
-            focus_history: Vec::new(),
         }
     }
 
@@ -239,36 +230,11 @@ impl Tree {
         out
     }
 
-    /// Records the currently focused window. `id` may be a tiled window in
-    /// this tree, a floating window, or `None` — only tiled-window focus
-    /// updates `focus_history` (architecture.md §3.3 step 1's fallback
-    /// chain).
-    pub fn set_focus(&mut self, id: Option<WindowId>) {
-        self.current_focus = id;
-        if let Some(id) = id {
-            if self.contains(id) {
-                self.focus_history.retain(|&x| x != id);
-                self.focus_history.insert(0, id);
-            }
-        }
-    }
-
-    /// architecture.md §3.3 step 1's target-leaf selection, minus the
-    /// empty-tree case (handled directly in `insert`).
-    fn target_leaf_for_insert(&self) -> Option<WindowId> {
-        if let Some(focused) = self.current_focus {
-            if self.contains(focused) {
-                return Some(focused);
-            }
-        }
-        self.focus_history
-            .iter()
-            .copied()
-            .find(|&id| self.contains(id))
-    }
-
-    /// Insertion rule (architecture.md §3.3). Applies the leaf-selection
-    /// fallback chain, then splits that leaf per `insert_heuristic`.
+    /// Insertion rule (architecture.md §3.3): targets the tiled leaf with
+    /// the largest on-screen area (ties broken by lowest `WindowId`, same
+    /// convention as §3.5 step 5), then splits that leaf per
+    /// `insert_heuristic`. Deliberately not focus-based — see §3.3's
+    /// rationale.
     ///
     /// # Panics
     ///
@@ -285,23 +251,23 @@ impl Tree {
             return InsertOutcome::Inserted;
         }
 
-        // Neither `current_focus` nor `focus_history` names a tiled window
-        // still in this (non-empty) tree — e.g. nothing was ever focused via
-        // `set_focus`. architecture.md §3.3 doesn't cover this case (in
-        // practice the daemon always has AX focus info); fall back to the
-        // lowest window ID for a deterministic pick, echoing the tie-break
-        // convention in §3.5 step 5.
-        let target = self
-            .target_leaf_for_insert()
-            .or_else(|| self.window_ids().into_iter().min())
-            .expect("tree is non-empty, so it has at least one leaf");
-
         let rects = self.layout(visible_frame, gaps);
-        let target_rect = rects
-            .iter()
-            .find(|(id, _)| *id == target)
-            .map(|(_, r)| *r)
-            .expect("target leaf is in this tree, so layout() must include it");
+        let mut best: Option<(WindowId, Rect, f64)> = None;
+        for (id, rect) in &rects {
+            let area = rect.width * rect.height;
+            match best {
+                None => best = Some((*id, *rect, area)),
+                Some((best_id, _, best_area)) => {
+                    if area > best_area + f64::EPSILON
+                        || ((area - best_area).abs() <= f64::EPSILON && *id < best_id)
+                    {
+                        best = Some((*id, *rect, area));
+                    }
+                }
+            }
+        }
+        let (target, target_rect, _) =
+            best.expect("tree is non-empty, so layout() yields at least one leaf");
 
         let direction = match self.insert_heuristic {
             InsertHeuristic::AlwaysVertical => SplitDirection::Vertical,
@@ -368,10 +334,6 @@ impl Tree {
             *parent_ref = sibling;
         }
 
-        self.focus_history.retain(|&id| id != window);
-        if self.current_focus == Some(window) {
-            self.current_focus = None;
-        }
         true
     }
 
@@ -609,6 +571,21 @@ mod tests {
         rects.iter().find(|(id, _)| *id == w).unwrap().1
     }
 
+    // Ratio arithmetic in the resize tests below composes several
+    // non-exact-in-binary steps (e.g. 0.5 - 0.01), so exact `assert_eq!`
+    // isn't reliable there the way it is for the clean halves/tenths
+    // elsewhere in this file -- this is the tolerance-based equivalent.
+    fn assert_rect_approx(actual: Rect, expected: Rect) {
+        let close = |a: f64, b: f64| (a - b).abs() < 1e-9;
+        assert!(
+            close(actual.x, expected.x)
+                && close(actual.y, expected.y)
+                && close(actual.width, expected.width)
+                && close(actual.height, expected.height),
+            "expected {expected:?}, got {actual:?}"
+        );
+    }
+
     // (a) Symmetric 2x2 grid.
     #[test]
     fn symmetric_2x2_grid() {
@@ -616,11 +593,8 @@ mod tests {
         let (w1, w2, w3, w4) = (id(1), id(2), id(3), id(4));
 
         assert_eq!(t.insert(w1, SCREEN, NO_GAPS), InsertOutcome::Inserted);
-        t.set_focus(Some(w1));
         assert_eq!(t.insert(w2, SCREEN, NO_GAPS), InsertOutcome::Inserted); // vertical: w1|w2
-        t.set_focus(Some(w1));
         assert_eq!(t.insert(w3, SCREEN, NO_GAPS), InsertOutcome::Inserted); // w1 (400x600) -> horizontal
-        t.set_focus(Some(w2));
         assert_eq!(t.insert(w4, SCREEN, NO_GAPS), InsertOutcome::Inserted); // w2 (400x600) -> horizontal
 
         let rects = t.layout(SCREEN, NO_GAPS);
@@ -672,9 +646,7 @@ mod tests {
         let (w1, w2, w3) = (id(1), id(2), id(3));
 
         t.insert(w1, SCREEN, NO_GAPS); // root
-        t.set_focus(Some(w1));
         t.insert(w2, SCREEN, NO_GAPS); // vertical: w1 (left 400x600) | w2 (right 400x600)
-        t.set_focus(Some(w1));
         t.insert(w3, SCREEN, NO_GAPS); // w1 (400x600, taller than wide) -> horizontal: w1 top-left | w3 bottom-left
 
         // Break the top/bottom symmetry so the return trip isn't a distance
@@ -785,9 +757,7 @@ mod tests {
         let (w1, w2, w3) = (id(1), id(2), id(3));
 
         t.insert(w1, SCREEN, NO_GAPS);
-        t.set_focus(Some(w1));
         t.insert(w2, SCREEN, NO_GAPS); // vertical: w1 (left) | w2 (right)
-        t.set_focus(Some(w1));
         t.insert(w3, SCREEN, NO_GAPS); // w1 -> horizontal, ratio 0.5: w1 top-left | w3 bottom-left
 
         // w2 (right column, full height) is exactly equidistant from w1
@@ -830,11 +800,8 @@ mod tests {
         let mut t = tree(4);
         let (w1, w2, w3, w4) = (id(1), id(2), id(3), id(4));
         t.insert(w1, SCREEN, NO_GAPS);
-        t.set_focus(Some(w1));
         t.insert(w2, SCREEN, NO_GAPS);
-        t.set_focus(Some(w1));
         t.insert(w3, SCREEN, NO_GAPS);
-        t.set_focus(Some(w2));
         t.insert(w4, SCREEN, NO_GAPS); // symmetric 2x2, see symmetric_2x2_grid
 
         let before = t.layout(SCREEN, NO_GAPS);
@@ -863,7 +830,6 @@ mod tests {
         let mut t = tree(2);
         let (w1, w2, w3) = (id(1), id(2), id(3));
         assert_eq!(t.insert(w1, SCREEN, NO_GAPS), InsertOutcome::Inserted);
-        t.set_focus(Some(w1));
         assert_eq!(t.insert(w2, SCREEN, NO_GAPS), InsertOutcome::Inserted);
         assert_eq!(t.insert(w3, SCREEN, NO_GAPS), InsertOutcome::CapReached);
         assert_eq!(t.tiled_count(), 2);
@@ -879,11 +845,8 @@ mod tests {
         let mut t = tree(4);
         let (w1, w2, w3, w4, w5) = (id(1), id(2), id(3), id(4), id(5));
         assert_eq!(t.insert(w1, SCREEN, NO_GAPS), InsertOutcome::Inserted);
-        t.set_focus(Some(w1));
         assert_eq!(t.insert(w2, SCREEN, NO_GAPS), InsertOutcome::Inserted);
-        t.set_focus(Some(w1));
         assert_eq!(t.insert(w3, SCREEN, NO_GAPS), InsertOutcome::Inserted);
-        t.set_focus(Some(w1));
         assert_eq!(t.insert(w4, SCREEN, NO_GAPS), InsertOutcome::Inserted);
         assert_eq!(t.tiled_count(), 4);
         assert!(t.contains(w4));
@@ -899,9 +862,7 @@ mod tests {
         let mut t = tree(4);
         let (w1, w2, w3) = (id(1), id(2), id(3));
         t.insert(w1, SCREEN, NO_GAPS);
-        t.set_focus(Some(w1));
         t.insert(w2, SCREEN, NO_GAPS); // vertical: w1 | w2
-        t.set_focus(Some(w1));
         t.insert(w3, SCREEN, NO_GAPS); // w1 -> horizontal: w1 top-left | w3 bottom-left
 
         assert!(t.remove(w3));
@@ -911,7 +872,6 @@ mod tests {
         // Collapsed back to exactly the 2-window layout.
         let mut expected = tree(4);
         expected.insert(w1, SCREEN, NO_GAPS);
-        expected.set_focus(Some(w1));
         expected.insert(w2, SCREEN, NO_GAPS);
         assert_eq!(t.layout(SCREEN, NO_GAPS), expected.layout(SCREEN, NO_GAPS));
     }
@@ -942,9 +902,7 @@ mod tests {
         let mut t = Tree::new(4, InsertHeuristic::AlwaysVertical, 0.5);
         let (w1, w2, w3) = (id(1), id(2), id(3));
         t.insert(w1, SCREEN, NO_GAPS);
-        t.set_focus(Some(w1));
         t.insert(w2, SCREEN, NO_GAPS); // 400x600, taller than wide, but forced vertical
-        t.set_focus(Some(w1));
         t.insert(w3, SCREEN, NO_GAPS);
 
         let rects = t.layout(SCREEN, NO_GAPS);
@@ -959,7 +917,6 @@ mod tests {
         let mut t = Tree::new(4, InsertHeuristic::AlwaysHorizontal, 0.5);
         let (w1, w2) = (id(1), id(2));
         t.insert(w1, SCREEN, NO_GAPS);
-        t.set_focus(Some(w1));
         t.insert(w2, SCREEN, NO_GAPS);
 
         let rects = t.layout(SCREEN, NO_GAPS);
@@ -973,7 +930,6 @@ mod tests {
         let mut t = tree(4);
         let (w1, w2) = (id(1), id(2));
         t.insert(w1, SCREEN, NO_GAPS);
-        t.set_focus(Some(w1));
         t.insert(w2, SCREEN, NO_GAPS); // vertical: w1 (first/left) | w2 (second/right)
 
         // w1 is the first child, so it's the *preferred* split for
@@ -1000,7 +956,6 @@ mod tests {
         let mut t = tree(4);
         let (w1, w2) = (id(1), id(2));
         t.insert(w1, SCREEN, NO_GAPS);
-        t.set_focus(Some(w1));
         t.insert(w2, SCREEN, NO_GAPS); // vertical: w1 (first) | w2 (second)
 
         assert!(t.resize(w2, Direction::Left, 0.1, 0.1, 0.9));
@@ -1049,9 +1004,7 @@ mod tests {
         let mut t = Tree::new(4, InsertHeuristic::AlwaysVertical, 0.5);
         let (w1, w2, w3) = (id(1), id(2), id(3));
         t.insert(w1, SCREEN, NO_GAPS); // root
-        t.set_focus(Some(w1));
         t.insert(w2, SCREEN, NO_GAPS); // Root: Vertical, w1 (First) | w2 (Second)
-        t.set_focus(Some(w1));
         t.insert(w3, SCREEN, NO_GAPS); // w1 -> Vertical again: w1 (First) | w3 (Second)
 
         let before = t.layout(SCREEN, NO_GAPS);
@@ -1089,15 +1042,25 @@ mod tests {
     // mixed in) -- not a forced `always_vertical` config. Confirms the
     // fix isn't specific to the synthetic all-vertical shape.
     //
-    //   Root: Vertical(ratio .5)
-    //   ├─ First: Vertical(ratio .5)          <- inner, same axis as Root
-    //   │   ├─ First:  w1  (x:    0-600)
-    //   │   └─ Second: Horizontal(ratio .5)
-    //   │       ├─ First:  w3  (x: 600-1200, y:   0-450)
-    //   │       └─ Second: w4  (x: 600-1200, y: 450-900)
-    //   └─ Second: w2  (x: 1200-2400)
+    // Area-based insertion (architecture.md §3.3) can't reach this shape
+    // through *unaided* sequential inserts -- with every split exactly
+    // halved, the largest leaf after N windows is always one of the
+    // earliest, most-coarsely-split branches, never a leaf two levels
+    // deep. So this test builds the shape with `resize` calls between
+    // inserts (same technique `asymmetric_move_right_then_left_...` above
+    // uses to break symmetry deliberately), shrinking w2's share and
+    // growing w3's until w3 is both the largest leaf *and* narrower than
+    // it is tall:
     //
-    // w3's true right edge (x=1200) is the outer Root|w2 boundary, two
+    //   Root: Vertical(ratio .7)
+    //   ├─ First: Vertical(ratio .49)         <- inner, same axis as Root
+    //   │   ├─ First:  w1  (x:     0-823.2)
+    //   │   └─ Second: Horizontal(ratio .5)
+    //   │       ├─ First:  w3  (x: 823.2-1680, y:   0-450)
+    //   │       └─ Second: w4  (x: 823.2-1680, y: 450-900)
+    //   └─ Second: w2  (x: 1680-2400)
+    //
+    // w3's true right edge (x=1680) is the outer Root|w2 boundary, two
     // levels up -- the nearest Vertical-axis ancestor (the inner split,
     // one level up) is on the wrong side, same as above.
     #[test]
@@ -1106,32 +1069,39 @@ mod tests {
         let mut t = tree(4);
         let (w1, w2, w3, w4) = (id(1), id(2), id(3), id(4));
         t.insert(w1, wide, NO_GAPS); // root
-        t.set_focus(Some(w1));
         t.insert(w2, wide, NO_GAPS); // w1 (2400x900, wider) -> vertical: w1 | w2, 1200 each
-        t.set_focus(Some(w1));
-        t.insert(w3, wide, NO_GAPS); // w1 (1200x900, still wider) -> vertical again: w1 | w3, 600 each
-        t.set_focus(Some(w3));
-        t.insert(w4, wide, NO_GAPS); // w3 (600x900, taller) -> horizontal: w3 | w4, 450 each
+        t.insert(w3, wide, NO_GAPS); // tied areas -> lowest id (w1, 1200x900, still wider) -> vertical again: w1 | w3, 600 each
+
+        // Shrink w2 (grows the outer Root split's First share, the w1/w3
+        // group) until that group's leaves outweigh w2...
+        assert!(t.resize(w2, Direction::Right, 0.2, 0.1, 0.9)); // root ratio .5 -> .7
+        // ...then shrink w1 (grows the inner split's Second share, w3)
+        // until w3 -- specifically -- is the single largest leaf, and
+        // still narrower than it is tall (823.2 < 1680*0.51 < 900).
+        assert!(t.resize(w3, Direction::Left, 0.01, 0.1, 0.9)); // inner ratio .5 -> .49
+
+        t.insert(w4, wide, NO_GAPS); // w3 (856.8x900, taller) -> horizontal: w3 | w4, 450 each
 
         let before = t.layout(wide, NO_GAPS);
-        assert_eq!(rect_of(&before, w1), Rect { x: 0.0, y: 0.0, width: 600.0, height: 900.0 });
-        assert_eq!(rect_of(&before, w3), Rect { x: 600.0, y: 0.0, width: 600.0, height: 450.0 });
-        assert_eq!(rect_of(&before, w4), Rect { x: 600.0, y: 450.0, width: 600.0, height: 450.0 });
-        assert_eq!(rect_of(&before, w2), Rect { x: 1200.0, y: 0.0, width: 1200.0, height: 900.0 });
+        assert_rect_approx(rect_of(&before, w1), Rect { x: 0.0, y: 0.0, width: 823.2, height: 900.0 });
+        assert_rect_approx(rect_of(&before, w3), Rect { x: 823.2, y: 0.0, width: 856.8, height: 450.0 });
+        assert_rect_approx(rect_of(&before, w4), Rect { x: 823.2, y: 450.0, width: 856.8, height: 450.0 });
+        assert_rect_approx(rect_of(&before, w2), Rect { x: 1680.0, y: 0.0, width: 720.0, height: 900.0 });
 
         assert!(t.resize(w3, Direction::Right, 0.1, 0.1, 0.9));
         let after = t.layout(wide, NO_GAPS);
-        // Root ratio 0.5 -> 0.6: the left group's total width grows from
-        // 1200 to 1440, at w2's expense -- w1 and w4 grow alongside w3
+        // Root ratio 0.7 -> 0.8: the left group's total width grows from
+        // 1680 to 1920, at w2's expense -- w1 and w4 grow alongside w3
         // (same "adjusting one ratio scales its whole branch" reasoning
         // as the test above), but the key property holds: w3's right
-        // edge (600+600=1200 before) moves to 720+720=1440, matching the
-        // group's new boundary -- not frozen in place the way the pre-fix
-        // code would have left it while shrinking w1 instead.
-        assert_eq!(rect_of(&after, w1), Rect { x: 0.0, y: 0.0, width: 720.0, height: 900.0 });
-        assert_eq!(rect_of(&after, w3), Rect { x: 720.0, y: 0.0, width: 720.0, height: 450.0 });
-        assert_eq!(rect_of(&after, w4), Rect { x: 720.0, y: 450.0, width: 720.0, height: 450.0 });
-        assert_eq!(rect_of(&after, w2), Rect { x: 1440.0, y: 0.0, width: 960.0, height: 900.0 });
+        // edge (823.2+856.8=1680 before) moves to 940.8+979.2=1920,
+        // matching the group's new boundary -- not frozen in place the
+        // way the pre-fix code would have left it while shrinking w1
+        // instead.
+        assert_rect_approx(rect_of(&after, w1), Rect { x: 0.0, y: 0.0, width: 940.8, height: 900.0 });
+        assert_rect_approx(rect_of(&after, w3), Rect { x: 940.8, y: 0.0, width: 979.2, height: 450.0 });
+        assert_rect_approx(rect_of(&after, w4), Rect { x: 940.8, y: 450.0, width: 979.2, height: 450.0 });
+        assert_rect_approx(rect_of(&after, w2), Rect { x: 1920.0, y: 0.0, width: 480.0, height: 900.0 });
     }
 
     #[test]
@@ -1144,25 +1114,24 @@ mod tests {
         assert!(!t.resize(w1, Direction::Up, 0.1, 0.1, 0.9));
     }
 
+    // Dedicated tie-break coverage for insertion (architecture.md §3.3
+    // step 1): with two leaves of exactly equal area, the lower WindowId
+    // is the insertion target -- same convention as move_direction's tie-
+    // break (§3.5 step 5), and what makes symmetric_2x2_grid's leaf
+    // choices deterministic above rather than incidental.
     #[test]
-    fn set_focus_on_float_falls_back_to_tiled_history() {
+    fn insert_tie_break_picks_lowest_window_id() {
         let mut t = tree(4);
-        let (w1, w2, floater) = (id(1), id(2), id(3));
-        t.insert(w1, SCREEN, NO_GAPS);
-        t.set_focus(Some(w1));
-        t.insert(w2, SCREEN, NO_GAPS); // vertical: w1 (left) | w2 (right)
+        let (w1, w2, w3) = (id(1), id(2), id(3));
+        t.insert(w1, SCREEN, NO_GAPS); // root
+        t.insert(w2, SCREEN, NO_GAPS); // vertical: w1 (left) | w2 (right), tied areas
 
-        t.set_focus(Some(w1));
-        // Focus moves to a floating window not in this tree at all.
-        t.set_focus(Some(floater));
-
-        // Insertion should target w1 (most-recently-focused tiled leaf),
-        // not fail or pick arbitrarily.
-        let w3 = id(4);
+        // w1 and w2 are both 400x600 -- an exact area tie. w3 must land
+        // in w1's leaf (lower id), not w2's.
         t.insert(w3, SCREEN, NO_GAPS);
         let rects = t.layout(SCREEN, NO_GAPS);
-        // w1 was 400x600 (taller than wide) -> split horizontal.
         assert_eq!(rect_of(&rects, w1).height, 300.0);
         assert_eq!(rect_of(&rects, w3).height, 300.0);
+        assert_eq!(rect_of(&rects, w2).height, 600.0);
     }
 }

@@ -127,7 +127,16 @@ fn hidutil_json(target_usage_id: u64) -> String {
     )
 }
 
-pub fn run(_args: &[String]) -> ExitCode {
+pub fn run(args: &[String]) -> ExitCode {
+    if crate::wants_help(args) {
+        print_help();
+        return ExitCode::SUCCESS;
+    }
+    if let Some(other) = args.first() {
+        eprintln!("hyperwm install-keymap: unrecognized argument \"{other}\"");
+        return ExitCode::FAILURE;
+    }
+
     let key_name = target_key_name();
     let Some(usage_id) = function_key_usage_id(&key_name) else {
         eprintln!(
@@ -154,6 +163,23 @@ pub fn run(_args: &[String]) -> ExitCode {
             ExitCode::FAILURE
         }
     }
+}
+
+fn print_help() {
+    println!("hyperwm install-keymap");
+    println!();
+    println!(
+        "Remap Caps Lock to hyperkey.watch_keycode via hidutil, applied immediately and \
+         persisted across logins via a launchd LaunchAgent (architecture.md §2.1)."
+    );
+    println!();
+    println!("USAGE:");
+    println!("    hyperwm install-keymap");
+    println!();
+    println!(
+        "Defaults to \"f18\" if no config file is found yet. Only f1-f20 are supported as a \
+         remap target -- see docs/keybinds.md#key-names."
+    );
 }
 
 fn apply_and_persist(key_name: &str, json: &str) -> Result<(), String> {

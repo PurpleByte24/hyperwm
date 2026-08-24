@@ -106,9 +106,13 @@ fn write_daemon_plist() -> Result<PathBuf, String> {
 
 pub fn run(args: &[String]) -> ExitCode {
     match args.first().map(String::as_str) {
-        Some("start") => start(),
-        Some("stop") => stop(),
-        Some("restart") => restart(),
+        Some("start") => start(&args[1..]),
+        Some("stop") => stop(&args[1..]),
+        Some("restart") => restart(&args[1..]),
+        Some("-h" | "--help") => {
+            print_help();
+            ExitCode::SUCCESS
+        }
         Some(other) => {
             eprintln!(
                 "hyperwm daemon: unknown subcommand \"{other}\" (expected start, stop, or \
@@ -123,7 +127,27 @@ pub fn run(args: &[String]) -> ExitCode {
     }
 }
 
-fn start() -> ExitCode {
+fn print_help() {
+    println!("hyperwm daemon");
+    println!();
+    println!("Manage hyperwm-daemon as a launchd user agent.");
+    println!();
+    println!("USAGE:");
+    println!("    hyperwm daemon <SUBCOMMAND>");
+    println!();
+    println!("SUBCOMMANDS:");
+    println!("    start      Start hyperwm-daemon (no-op if already running)");
+    println!("    stop       Stop hyperwm-daemon (no-op if not running)");
+    println!("    restart    Kill and respawn hyperwm-daemon");
+}
+
+fn start(args: &[String]) -> ExitCode {
+    if crate::wants_help(args) {
+        println!("hyperwm daemon start");
+        println!();
+        println!("Start hyperwm-daemon as a launchd user agent. No-op if it's already running.");
+        return ExitCode::SUCCESS;
+    }
     match launchd::is_running(LABEL) {
         Ok(true) => {
             println!("hyperwm-daemon is already running -- nothing to do");
@@ -162,7 +186,13 @@ fn start_stopped_daemon() -> Result<(), String> {
     }
 }
 
-fn stop() -> ExitCode {
+fn stop(args: &[String]) -> ExitCode {
+    if crate::wants_help(args) {
+        println!("hyperwm daemon stop");
+        println!();
+        println!("Stop hyperwm-daemon. No-op if it isn't running.");
+        return ExitCode::SUCCESS;
+    }
     match launchd::is_bootstrapped(LABEL) {
         Ok(false) => {
             println!("hyperwm-daemon is already stopped -- nothing to do");
@@ -190,7 +220,13 @@ fn stop() -> ExitCode {
 /// means "I want a new process," whereas `start` means "make sure one is
 /// running" (see this module's doc comment for why conflating the two was
 /// the bug being fixed here).
-fn restart() -> ExitCode {
+fn restart(args: &[String]) -> ExitCode {
+    if crate::wants_help(args) {
+        println!("hyperwm daemon restart");
+        println!();
+        println!("Kill and respawn hyperwm-daemon (always, even if it wasn't running).");
+        return ExitCode::SUCCESS;
+    }
     match restart_inner() {
         Ok(()) => {
             println!("hyperwm-daemon restarted");

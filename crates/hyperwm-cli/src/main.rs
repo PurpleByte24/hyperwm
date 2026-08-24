@@ -61,8 +61,8 @@ use hyperwm_config::protocol::{self, Request, Response, WindowSummary};
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().collect();
     match args.get(1).map(String::as_str) {
-        Some("reload") => reload(),
-        Some("status") => status(),
+        Some("reload") => reload(&args[2..]),
+        Some("status") => status(&args[2..]),
         Some("verify") => verify(&args[2..]),
         Some("daemon") => daemon::run(&args[2..]),
         Some("install-keymap") => keymap::run(&args[2..]),
@@ -84,6 +84,18 @@ fn main() -> ExitCode {
             ExitCode::FAILURE
         }
     }
+}
+
+/// Every hand-rolled subcommand parser in this crate (`main.rs`, `daemon.rs`,
+/// `keymap.rs`) checks this before doing anything else with side effects --
+/// there's no argument-parsing framework here to give `-h`/`--help` that for
+/// free, so each parser is responsible for checking it explicitly rather
+/// than falling through to its normal argument handling (which previously
+/// either misread `--help` as an invalid subcommand/argument, or -- for
+/// `install-keymap`, which ignored its argv entirely -- silently ran the
+/// real command instead of printing help).
+pub(crate) fn wants_help(args: &[String]) -> bool {
+    args.iter().any(|arg| arg == "-h" || arg == "--help")
 }
 
 fn print_version() {
@@ -142,7 +154,16 @@ fn call(request: &Request) -> Result<Response, String> {
     }
 }
 
-fn reload() -> ExitCode {
+fn reload(args: &[String]) -> ExitCode {
+    if wants_help(args) {
+        println!("hyperwm reload");
+        println!();
+        println!("Reload the running daemon's config (architecture.md §6).");
+        println!();
+        println!("USAGE:");
+        println!("    hyperwm reload");
+        return ExitCode::SUCCESS;
+    }
     match call(&Request::Reload) {
         Ok(Response::Reloaded { builtin_keybinds, script_keybinds }) => {
             println!(
@@ -169,7 +190,16 @@ fn reload() -> ExitCode {
     }
 }
 
-fn status() -> ExitCode {
+fn status(args: &[String]) -> ExitCode {
+    if wants_help(args) {
+        println!("hyperwm status");
+        println!();
+        println!("Show the running daemon's tiling state and health.");
+        println!();
+        println!("USAGE:");
+        println!("    hyperwm status");
+        return ExitCode::SUCCESS;
+    }
     match call(&Request::Status) {
         Ok(Response::Status(report)) => {
             println!("hyperwm-daemon: running (pid {})", report.pid);
@@ -218,6 +248,19 @@ fn print_window(window: &WindowSummary) {
 /// validation -- see `hyperwm-config/src/validate.rs`). Runs entirely
 /// locally; no socket, no running daemon required.
 fn verify(args: &[String]) -> ExitCode {
+    if wants_help(args) {
+        println!("hyperwm verify");
+        println!();
+        println!("Validate a config file (works without a running daemon).");
+        println!();
+        println!("USAGE:");
+        println!("    hyperwm verify [--config <path>]");
+        println!();
+        println!("Defaults to ~/.config/hyperwm/config.toml, falling back to");
+        println!("~/.hyperwm/config.toml, when --config isn't given.");
+        return ExitCode::SUCCESS;
+    }
+
     let mut config_path: Option<PathBuf> = None;
     let mut args = args.iter();
     while let Some(arg) = args.next() {

@@ -31,12 +31,13 @@ use std::cell::RefCell;
 use std::rc::Rc;
 
 use accessibility_sys::{
-    kAXUIElementDestroyedNotification, kAXWindowCreatedNotification, kAXWindowMovedNotification,
-    kAXWindowResizedNotification, kAXWindowsAttribute, pid_t,
+    kAXUIElementDestroyedNotification, kAXWindowCreatedNotification,
+    kAXWindowMiniaturizedNotification, kAXWindowMovedNotification, kAXWindowResizedNotification,
+    kAXWindowsAttribute, pid_t,
 };
 use hyperwm_macos::ax::{AXNotification, AXUIElement, WindowObserver};
 
-use crate::state::DaemonState;
+use crate::state::{DaemonState, AX_WINDOW_DEMINIATURIZED_NOTIFICATION};
 
 /// How to treat the windows [`adopt_app`] finds already open for `pid`
 /// (see this module's doc comment for the rationale).
@@ -102,5 +103,11 @@ fn dispatch_notification(state: &Rc<RefCell<DaemonState>>, event: AXNotification
         state.borrow_mut().handle_window_destroyed(&event.element);
     } else if name == kAXWindowMovedNotification || name == kAXWindowResizedNotification {
         state.borrow_mut().handle_drift(&event.element);
+    } else if name == kAXWindowMiniaturizedNotification {
+        state.borrow_mut().handle_window_minimized(&event.element);
+    } else if name == AX_WINDOW_DEMINIATURIZED_NOTIFICATION {
+        if let Ok(pid) = event.element.pid() {
+            state.borrow_mut().handle_window_deminiaturized(pid, &event.element);
+        }
     }
 }

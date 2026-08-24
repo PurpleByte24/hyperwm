@@ -23,9 +23,16 @@ use std::collections::{BTreeSet, HashMap};
 
 use accessibility_sys::{
     kAXFocusedWindowAttribute, kAXMinimizedAttribute, kAXStandardWindowSubrole,
-    kAXSubroleAttribute, kAXUIElementDestroyedNotification, kAXWindowMovedNotification,
-    kAXWindowResizedNotification, kAXWindowsAttribute, pid_t,
+    kAXSubroleAttribute, kAXUIElementDestroyedNotification, kAXWindowMiniaturizedNotification,
+    kAXWindowMovedNotification, kAXWindowResizedNotification, kAXWindowsAttribute, pid_t,
 };
+
+/// Not in `accessibility_sys` (only the miniaturize half is) -- Apple's
+/// documented constant is `kAXWindowDeminiaturizedNotification`, value
+/// `"AXWindowDeminiaturized"`. `pub(crate)` so `lifecycle.rs`'s
+/// notification dispatch can match on the same value without duplicating
+/// the literal.
+pub(crate) const AX_WINDOW_DEMINIATURIZED_NOTIFICATION: &str = "AXWindowDeminiaturized";
 use core_graphics::geometry::{CGPoint, CGSize};
 
 use hyperwm_config::{Action, Config, FloatPlacement};
@@ -312,6 +319,12 @@ impl DaemonState {
         }
         let id = self.windows.register(window.clone(), pid);
         self.watch(pid, &window, kAXUIElementDestroyedNotification);
+        // Minimize state is tracked for every window, tiled or floating --
+        // see `handle_window_minimized`/`handle_window_deminiaturized`'s
+        // doc comments for why (architecture.md is silent on minimized
+        // windows; this is the daemon's own policy, not the spec's).
+        self.watch(pid, &window, kAXWindowMiniaturizedNotification);
+        self.watch(pid, &window, AX_WINDOW_DEMINIATURIZED_NOTIFICATION);
         id
     }
 
@@ -327,15 +340,24 @@ impl DaemonState {
         if self.windows.is_known(&window) || !Self::is_standard_window(&window) {
             return;
         }
-        let id = self.windows.register(window.clone(), pid);
-        self.watch(pid, &window, kAXUIElementDestroyedNotification);
+        let id = self.register_only(pid, window.clone());
+        self.classify_window(id, pid, &window);
+    }
 
-        // architecture.md §3.11: `kAXWindowCreatedNotification` is
-        // per-app, not per-Space, so this can fire well before
-        // `handle_space_change`'s next poll tick notices a Space switch --
-        // reconcile against what's actually on screen right now first, or
-        // this window gets classified against the *previous* Space's
-        // tree/floating list. See `reconcile_before_insert`'s doc comment.
+    /// The tile-or-float decision (architecture.md §3.3, §3.2, §3.9) for a
+    /// window that's already registered (`id` known) but not currently
+    /// classified as tiled or floating -- shared by
+    /// [`DaemonState::handle_new_window`] (a genuinely new window) and
+    /// [`DaemonState::handle_window_deminiaturized`] (a window becoming
+    /// visible again, which the insertion rule treats the same way).
+    fn classify_window(&mut self, id: WindowId, pid: pid_t, window: &AXUIElement) {
+        // architecture.md §3.11: `kAXWindowCreatedNotification` (and
+        // deminiaturize, the same reasoning applies) is per-app, not
+        // per-Space, so this can fire well before `handle_space_change`'s
+        // next poll tick notices a Space switch -- reconcile against
+        // what's actually on screen right now first, or this window gets
+        // classified against the *previous* Space's tree/floating list.
+        // See `reconcile_before_insert`'s doc comment.
         self.reconcile_before_insert(id);
 
         let identity = identity::identity_for_pid(pid).unwrap_or_default();
@@ -346,22 +368,22 @@ impl DaemonState {
             .iter()
             .any(|pattern| identity.matches(pattern));
         if always_float {
-            self.float_new_window(id, &window);
-        } else if let Some(visible_frame) = self.visible_frame_for_window(&window) {
+            self.float_new_window(id, window);
+        } else if let Some(visible_frame) = self.visible_frame_for_window(window) {
             match self.tree.insert(id, visible_frame, self.config.gaps) {
                 InsertOutcome::Inserted => {
-                    self.watch(pid, &window, kAXWindowMovedNotification);
-                    self.watch(pid, &window, kAXWindowResizedNotification);
+                    self.watch(pid, window, kAXWindowMovedNotification);
+                    self.watch(pid, window, kAXWindowResizedNotification);
                     self.apply_tree_layout();
                 }
                 InsertOutcome::CapReached => {
-                    self.float_new_window(id, &window);
+                    self.float_new_window(id, window);
                 }
             }
         } else {
             // No display info to lay it out against; float rather than
             // silently dropping the window from hyperwm's tracking.
-            self.float_new_window(id, &window);
+            self.float_new_window(id, window);
         }
 
         // architecture.md §3.11 step 4: "cache the layout whenever it's
@@ -388,6 +410,44 @@ impl DaemonState {
         } else {
             self.floating.retain(|&w| w != id);
         }
+    }
+
+    /// A tiled or floating window being minimized. architecture.md doesn't
+    /// specify this; this daemon's own policy (confirmed via manual
+    /// testing that leaving a minimized window in `self.tree` breaks
+    /// tiling -- it still reserves a slot and a rect, and
+    /// `handle_space_change`'s on-screen enumeration already excludes
+    /// minimized windows for a different reason, so leaving it tracked
+    /// here too makes that on-screen-derived key permanently disagree with
+    /// what's actually tracked) is to treat it as if it doesn't exist
+    /// until restored: removed from whichever of `self.tree`/`self.floating`
+    /// currently holds it (collapsing its sibling per §3.4 if it was
+    /// tiled), but *not* deregistered -- it isn't closed, and
+    /// [`DaemonState::handle_window_deminiaturized`] needs it still known
+    /// to reclassify it later.
+    pub(crate) fn handle_window_minimized(&mut self, element: &AXUIElement) {
+        let Some(id) = self.windows.id_for(element) else {
+            return;
+        };
+        if self.tree.remove(id) {
+            self.apply_tree_layout();
+        } else {
+            self.floating.retain(|&w| w != id);
+        }
+        self.save_current_space();
+    }
+
+    /// The reverse of [`DaemonState::handle_window_minimized`]: a
+    /// de-miniaturized window is reclassified via the same tile-or-float
+    /// decision a genuinely new window gets ([`DaemonState::classify_window`],
+    /// architecture.md §3.3/§3.2/§3.9) -- treated as if it doesn't exist
+    /// while minimized, so becoming visible again is equivalent to a new
+    /// window appearing.
+    pub(crate) fn handle_window_deminiaturized(&mut self, pid: pid_t, element: &AXUIElement) {
+        let Some(id) = self.windows.id_for(element) else {
+            return;
+        };
+        self.classify_window(id, pid, element);
     }
 
     /// Drift correction for a tiled window (architecture.md §3.10):

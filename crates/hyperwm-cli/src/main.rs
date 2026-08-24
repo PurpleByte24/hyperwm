@@ -7,8 +7,12 @@
 //! it works whether or not a daemon is running -- the common case is
 //! checking a config *before* starting the daemon at all.
 //!
-//! `install-keymap` and `daemon start|stop|restart` (build unit 8,
-//! packaging) are not implemented here yet.
+//! `daemon start|stop|restart` and `install-keymap` (build unit 8,
+//! packaging) manage `hyperwm-daemon` and the Caps Lock remap as
+//! `launchd` user agents -- see `daemon.rs` and `keymap.rs` for the
+//! specifics (including `daemon start`'s already-running idempotency
+//! fix and `install-keymap`'s login-persistence LaunchAgent) and their
+//! module docs' manual verification checklists.
 //!
 //! # Manual verification
 //!
@@ -43,6 +47,10 @@
 //! - `cargo run -p hyperwm-cli -- --help` / `-h` and `--version` / `-v`
 //!   should print without needing a daemon or a config file at all.
 
+mod daemon;
+mod keymap;
+mod launchd;
+
 use std::io::BufReader;
 use std::os::unix::net::UnixStream;
 use std::path::PathBuf;
@@ -56,6 +64,8 @@ fn main() -> ExitCode {
         Some("reload") => reload(),
         Some("status") => status(),
         Some("verify") => verify(&args[2..]),
+        Some("daemon") => daemon::run(&args[2..]),
+        Some("install-keymap") => keymap::run(&args[2..]),
         Some("-h" | "--help") => {
             print_help();
             ExitCode::SUCCESS
@@ -92,6 +102,10 @@ fn print_help() {
     println!("    reload                     Reload the running daemon's config (architecture.md §6)");
     println!("    status                     Show the running daemon's tiling state and health");
     println!("    verify [--config <path>]   Validate a config file (works without a running daemon)");
+    println!("    daemon start               Start hyperwm-daemon as a launchd user agent (no-op if already running)");
+    println!("    daemon stop                Stop hyperwm-daemon (no-op if not running)");
+    println!("    daemon restart             Kill and respawn hyperwm-daemon");
+    println!("    install-keymap             Remap Caps Lock via hidutil, persisted across logins (architecture.md §2.1)");
     println!("    -h, --help                 Print this help message");
     println!("    -v, --version              Print the version");
 }

@@ -23,6 +23,18 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: Set crate version from tag
+        # workspace.package.version in the root Cargo.toml is what
+        # env!("CARGO_PKG_VERSION") embeds into `hyperwm --version`/--help
+        # at compile time -- stamp it from the pushed tag here so the
+        # shipped binary always matches the release, instead of relying on
+        # Cargo.toml having been bumped by hand before tagging.
+        run: |
+          set -euo pipefail
+          version="${GITHUB_REF_NAME#v}"
+          sed -i '' -E "s/^version = \".*\"/version = \"${version}\"/" Cargo.toml
+          grep '^version' Cargo.toml
+
       - name: Install Rust targets
         run: rustup target add aarch64-apple-darwin x86_64-apple-darwin
 

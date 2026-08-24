@@ -1,0 +1,64 @@
+# Builds a universal (arm64 + x86_64) macOS release binary and attaches it
+# to a GitHub release whenever a "vX.Y.Z" tag is pushed. This repo mirrors
+# from a private self-hosted Gitea to GitHub specifically so this workflow
+# (and the separate homebrew-hyperwm tap, which only exists on GitHub) can
+# run here -- see docs/installation.md and README.md for the release/
+# Homebrew story this feeds.
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*.*.*"
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    # GitHub-hosted macOS runners are arm64 by default; the x86_64 slice
+    # below is built by cross-compiling from here via an added rustup
+    # target, not a second runner.
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust targets
+        run: rustup target add aarch64-apple-darwin x86_64-apple-darwin
+
+      - name: Build (aarch64-apple-darwin)
+        run: cargo build --workspace --release --target aarch64-apple-darwin
+
+      - name: Build (x86_64-apple-darwin)
+        run: cargo build --workspace --release --target x86_64-apple-darwin
+
+      - name: Combine into universal binaries
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+          for bin in hyperwm hyperwm-daemon; do
+            lipo -create -output "dist/$bin" \
+              "target/aarch64-apple-darwin/release/$bin" \
+              "target/x86_64-apple-darwin/release/$bin"
+            chmod +x "dist/$bin"
+            lipo -info "dist/$bin"
+          done
+
+      - name: Package release tarball
+        run: |
+          set -euo pipefail
+          version="${GITHUB_REF_NAME#v}"
+          tarball="hyperwm-${version}-macos-universal.tar.gz"
+          tar -czf "$tarball" -C dist hyperwm hyperwm-daemon
+          shasum -a 256 "$tarball" > "$tarball.sha256"
+          echo "TARBALL=$tarball" >> "$GITHUB_ENV"
+
+      - name: Create GitHub release
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          gh release create "$GITHUB_REF_NAME" \
+            "$TARBALL" "$TARBALL.sha256" \
+            --title "$GITHUB_REF_NAME" \
+            --generate-notes

@@ -20,11 +20,13 @@
 //! instance), so every method below is a plain `&mut self`.
 
 use std::collections::{BTreeSet, HashMap};
+use std::path::Path;
 
 use accessibility_sys::{
     kAXFocusedWindowAttribute, kAXMinimizedAttribute, kAXStandardWindowSubrole,
-    kAXSubroleAttribute, kAXUIElementDestroyedNotification, kAXWindowMiniaturizedNotification,
-    kAXWindowMovedNotification, kAXWindowResizedNotification, kAXWindowsAttribute, pid_t,
+    kAXSubroleAttribute, kAXTitleAttribute, kAXUIElementDestroyedNotification,
+    kAXWindowMiniaturizedNotification, kAXWindowMovedNotification, kAXWindowResizedNotification,
+    kAXWindowsAttribute, pid_t,
 };
 
 /// Not in `accessibility_sys` (only the miniaturize half is) -- Apple's
@@ -35,12 +37,15 @@ use accessibility_sys::{
 pub(crate) const AX_WINDOW_DEMINIATURIZED_NOTIFICATION: &str = "AXWindowDeminiaturized";
 use core_graphics::geometry::{CGPoint, CGSize};
 
+use hyperwm_config::protocol::{RectSummary, StatusReport, WindowSummary};
 use hyperwm_config::{Action, Config, FloatPlacement};
 use hyperwm_core::{Direction, InsertOutcome, Rect, Tree, WindowId};
 use hyperwm_macos::ax::{self, AXUIElement, WindowObserver};
+use hyperwm_macos::keycode::CGKeyCode;
 use hyperwm_macos::{identity, screen};
 
 use crate::registry::WindowRegistry;
+use crate::router::Router;
 
 /// Fixed cascade offset (architecture.md §3.9's `new_float_placement =
 /// "cascade"`) applied per already-floating window, wrapping after this
@@ -96,6 +101,12 @@ struct SpaceLayout {
 
 pub struct DaemonState {
     config: Config,
+    /// Keybind lookup derived from `config` (Event Router, architecture.md
+    /// §1). Owned here rather than as a separate top-level value in
+    /// `main.rs` so [`DaemonState::reload_config`] can rebuild it alongside
+    /// `config` itself, keeping the two in sync by construction -- there's
+    /// no path where one updates without the other.
+    router: Router,
     tree: Tree,
     /// Membership + insertion order (used for cascade placement) of
     /// floating windows. Never their geometry -- that's queried live via
@@ -140,8 +151,10 @@ impl DaemonState {
             config.tiling.insert_heuristic,
             config.tiling.split_ratio_default,
         );
+        let router = Router::build(&config);
         Self {
             config,
+            router,
             tree,
             floating: Vec::new(),
             windows: WindowRegistry::default(),
@@ -150,6 +163,97 @@ impl DaemonState {
             space_cache: HashMap::new(),
             pending_space_change: None,
         }
+    }
+
+    /// Keybind lookup for the hyperkey watcher's callback (`main.rs`) --
+    /// see `router::Router::action_for`.
+    #[must_use]
+    pub fn action_for(&self, keycode: CGKeyCode, shift: bool) -> Option<Action> {
+        self.router.action_for(keycode, shift)
+    }
+
+    /// Script-keybind lookup for the hyperkey watcher's callback
+    /// (`main.rs`). Returns an owned path (rather than `Router::script_for`'s
+    /// borrowed one) so the caller doesn't need to keep this `DaemonState`
+    /// borrow alive past the lookup -- `main.rs`'s callback calls this and
+    /// `Self::dispatch` from the same closure, and the two can't hold
+    /// overlapping `RefCell` borrows.
+    #[must_use]
+    pub fn script_for(&self, keycode: CGKeyCode, shift: bool) -> Option<std::path::PathBuf> {
+        self.router.script_for(keycode, shift).map(Path::to_path_buf)
+    }
+
+    /// `hyperwm reload` (architecture.md §6): applies a freshly loaded,
+    /// already-validated [`Config`] going forward. Rebuilds
+    /// [`DaemonState::router`] from it and updates
+    /// [`DaemonState::tree`]'s tiling thresholds
+    /// (`max_tiled_windows`/`insert_heuristic`/`split_ratio_default`) via
+    /// [`Tree::set_config`] -- deliberately *not* a fresh `Tree`, so every
+    /// currently tiled window keeps its exact leaf and on-screen rect
+    /// (architecture.md §6: "does not tear down or rebuild existing window
+    /// trees"). Everything else config-driven (`gaps`, `tiling.resize`,
+    /// `floating.*`) is already read live from `self.config` on every use
+    /// (see e.g. `Self::apply_tree_layout`, `Self::move_floating`), so
+    /// swapping `self.config` itself is enough for those -- nothing else to
+    /// do here for them.
+    ///
+    /// Does **not** re-bind the hyperkey watch keycode even if
+    /// `hyperkey.watch_keycode` changed in `config`: the `CGEventTap`
+    /// `main.rs` installs at startup is created once, watching a keycode
+    /// fixed at that point (`hyperkey::install`'s `watch_keycode` argument
+    /// is captured by value into the tap's callback, not read from
+    /// `DaemonState` on each event) -- changing which physical key is the
+    /// hyperkey requires restarting the daemon. This is a deliberate scope
+    /// line, not an oversight: architecture.md §6 describes reload as
+    /// replacing "keybind/gap/threshold/etc." values, which reads as the
+    /// tiling/floating/keybind configuration reload already handles, not
+    /// the CGEventTap's own watched keycode -- rebinding a live event tap
+    /// safely (without a window to drop real keystrokes mid-swap) is a
+    /// materially bigger change than this unit's scope.
+    pub(crate) fn reload_config(&mut self, config: Config) {
+        self.router = Router::build(&config);
+        self.tree.set_config(
+            config.tiling.max_tiled_windows,
+            config.tiling.insert_heuristic,
+            config.tiling.split_ratio_default,
+        );
+        self.config = config;
+    }
+
+    /// `hyperwm status`: a snapshot of current tiling state for the socket
+    /// server (`socket.rs`). Queries each window's app/title/rect live via
+    /// AX at the moment this is called, for both tiled and floating windows
+    /// alike -- same "query live, don't cache" rationale architecture.md
+    /// §3.10 gives for floating windows specifically, just applied
+    /// uniformly here since this is a one-off report, not a hot path.
+    #[must_use]
+    pub(crate) fn status_report(&self, config_path: &Path) -> StatusReport {
+        let tiled = self.tree.window_ids().into_iter().filter_map(|id| self.window_summary(id));
+        let floating = self.floating.iter().filter_map(|&id| self.window_summary(id));
+        let focused = self.resolve_focused().and_then(|id| self.window_summary(id));
+        StatusReport {
+            pid: std::process::id(),
+            config_path: config_path.display().to_string(),
+            tiled: tiled.collect(),
+            floating: floating.collect(),
+            focused,
+        }
+    }
+
+    fn window_summary(&self, id: WindowId) -> Option<WindowSummary> {
+        let element = self.windows.element_for(id)?;
+        let pid = self.windows.pid_for(id)?;
+        let app = identity::identity_for_pid(pid)
+            .and_then(|identity| identity.name.or(identity.bundle_id))
+            .unwrap_or_else(|| format!("pid {pid}"));
+        let title = element.string_attribute(kAXTitleAttribute).unwrap_or_default();
+        let pos = element.position().ok()?;
+        let size = element.size().ok()?;
+        Some(WindowSummary {
+            app,
+            title,
+            rect: RectSummary { x: pos.x, y: pos.y, width: size.width, height: size.height },
+        })
     }
 
     /// Filters out AX elements that report as "windows" via
@@ -1077,5 +1181,126 @@ impl DaemonState {
         // revisit restores this, not a stale snapshot from whenever it was
         // last adopted.
         self.save_current_space();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use hyperwm_core::{Gaps, InsertOutcome};
+
+    const SCREEN: Rect = Rect { x: 0.0, y: 0.0, width: 800.0, height: 600.0 };
+    const NO_GAPS: Gaps = Gaps { outer: 0.0, inner: 0.0 };
+
+    /// A directory under the OS temp dir, unique to this test process and
+    /// test name, freshly emptied -- same convention as
+    /// `hyperwm-config`'s `tests/config_tests.rs::scratch_dir` and this
+    /// crate's `router.rs`/`script.rs` test modules.
+    fn scratch_dir(name: &str) -> std::path::PathBuf {
+        let dir = std::env::temp_dir()
+            .join("hyperwm-daemon-state-tests")
+            .join(format!("{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    /// Writes a minimal-but-valid config with the given
+    /// `tiling.max_tiled_windows` and loads it via `hyperwm_config::load`
+    /// -- exercising the same validation path `hyperwm reload` runs
+    /// through, not a hand-built `Config`.
+    fn config_with_cap(dir: &Path, max_tiled_windows: u32) -> Config {
+        let path = dir.join("config.toml");
+        let contents = format!(
+            r#"
+[hyperkey]
+watch_keycode = "f18"
+
+[tiling]
+max_tiled_windows = {max_tiled_windows}
+
+[gaps]
+outer = 0
+inner = 0
+"#
+        );
+        std::fs::write(&path, contents).unwrap();
+        hyperwm_config::load(&path).expect("test config should be valid")
+    }
+
+    // Architecture.md §6: reload applies new thresholds "going forward"
+    // without tearing down or rebuilding the existing tree. Drives
+    // `Tree::insert` directly (pure Rust, no AX/window server needed) to
+    // set up tiled windows, since `DaemonState::handle_new_window` requires
+    // a real `AXUIElement`.
+    #[test]
+    fn reload_config_updates_tiling_thresholds_without_touching_existing_tree_shape() {
+        let dir = scratch_dir("reload-thresholds");
+        let mut state = DaemonState::new(config_with_cap(&dir, 2));
+
+        assert_eq!(state.tree.insert(WindowId(1), SCREEN, NO_GAPS), InsertOutcome::Inserted);
+        assert_eq!(state.tree.insert(WindowId(2), SCREEN, NO_GAPS), InsertOutcome::Inserted);
+        let before = state.tree.layout(SCREEN, NO_GAPS);
+
+        // Reload with a *lower* cap: existing tiled windows must not be
+        // evicted or repositioned, even though tiled_count() now exceeds
+        // the new cap -- there is no eviction rule, only a gate on future
+        // insertion (see Tree::set_config's doc comment).
+        state.reload_config(config_with_cap(&dir, 1));
+
+        assert_eq!(state.tree.layout(SCREEN, NO_GAPS), before);
+        assert_eq!(state.tree.tiled_count(), 2);
+
+        // The new (lower) cap does apply going forward, to the next
+        // insertion.
+        assert_eq!(
+            state.tree.insert(WindowId(3), SCREEN, NO_GAPS),
+            InsertOutcome::CapReached
+        );
+    }
+
+    // Architecture.md §5/§1: reload also re-derives the Event Router from
+    // the new config, so a keybind added by the reload resolves
+    // immediately -- not just tiling thresholds.
+    #[test]
+    fn reload_config_rebuilds_the_router() {
+        let dir = scratch_dir("reload-router");
+        let initial = dir.join("initial.toml");
+        std::fs::write(
+            &initial,
+            r#"
+[hyperkey]
+watch_keycode = "f18"
+
+[gaps]
+outer = 0
+inner = 0
+"#,
+        )
+        .unwrap();
+        let mut state = DaemonState::new(hyperwm_config::load(&initial).unwrap());
+
+        let f = hyperwm_macos::keycode::lookup("f").unwrap();
+        assert_eq!(state.action_for(f, false), None);
+
+        let updated = dir.join("updated.toml");
+        std::fs::write(
+            &updated,
+            r#"
+[hyperkey]
+watch_keycode = "f18"
+
+[gaps]
+outer = 0
+inner = 0
+
+[keybinds]
+"hyper+f" = "toggle_float"
+"#,
+        )
+        .unwrap();
+        state.reload_config(hyperwm_config::load(&updated).unwrap());
+
+        assert_eq!(state.action_for(f, false), Some(Action::ToggleFloat));
     }
 }

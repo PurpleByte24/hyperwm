@@ -10,9 +10,12 @@
 //! `hyperwm-core` tree state and real AX window calls.
 //!
 //! Script keybinds (`[keybinds.scripts]`, architecture.md §5) dispatch
-//! through `router::Router::script_for` + `script::run`, alongside the
-//! built-in actions above. CLI reload (`hyperwm reload`/`status`/`verify`)
-//! is a later build unit (7), not wired here.
+//! through `DaemonState::script_for` + `script::run`, alongside the
+//! built-in actions above. `hyperwm reload`/`status` (build unit 7) are
+//! served over a Unix domain socket -- see `socket.rs` -- polled off the
+//! same `CFRunLoop` as everything else here; `hyperwm verify` doesn't talk
+//! to the daemon at all (it runs `hyperwm_config::load` directly in the
+//! CLI process).
 //!
 //! # Manual verification
 //!
@@ -70,11 +73,22 @@
 //!   on a return visit, ever. `hyper+t` (`auto_tile` in
 //!   examples/config.toml) is the only thing that forces the current
 //!   on-screen window set into a freshly computed layout.
+//! - `hyperwm status` (in a separate terminal, while the daemon runs)
+//!   should print this daemon's pid plus its current tiled/floating/focused
+//!   windows. `hyperwm reload` after editing the config should apply
+//!   keybind/gap/threshold changes immediately without touching existing
+//!   windows' positions; reloading a *deliberately broken* config (e.g. an
+//!   unknown action name under `[keybinds]`) must print the daemon's
+//!   previous config is still in effect and report the specific validation
+//!   error -- not crash, not hang, not drop to an unconfigured state
+//!   (architecture.md §6). See `crates/hyperwm-cli`'s doc comment for the
+//!   full CLI-side checklist.
 
 mod lifecycle;
 mod registry;
 mod router;
 mod script;
+mod socket;
 mod state;
 
 use std::cell::RefCell;
@@ -84,7 +98,6 @@ use std::rc::Rc;
 use core_foundation::runloop::CFRunLoop;
 use hyperwm_macos::{hyperkey, keycode, mouse, permissions, workspace};
 
-use router::Router;
 use state::DaemonState;
 
 /// `CGEventTap::new`'s callback bound requires `Send` (in case the tap
@@ -135,6 +148,30 @@ fn main() -> ExitCode {
     }
     println!("hyperwm-daemon: Accessibility and Input Monitoring permissions granted");
 
+    // Bound early and fail-fast, before touching any window-server state:
+    // if another hyperwm-daemon instance is already running, there's
+    // nothing useful this one can do (two daemons independently moving the
+    // same windows would fight each other), so refuse to start rather than
+    // silently taking over the socket out from under the running instance.
+    let socket_listener = match socket::bind(&hyperwm_config::protocol::socket_path()) {
+        Ok(listener) => listener,
+        Err(socket::BindError::AlreadyRunning) => {
+            eprintln!(
+                "hyperwm-daemon: another instance is already running (socket at {} is live) \
+                 -- not starting a second one",
+                hyperwm_config::protocol::socket_path().display()
+            );
+            return ExitCode::FAILURE;
+        }
+        Err(socket::BindError::Io(err)) => {
+            eprintln!(
+                "hyperwm-daemon: couldn't bind the CLI socket at {}: {err}",
+                hyperwm_config::protocol::socket_path().display()
+            );
+            return ExitCode::FAILURE;
+        }
+    };
+
     let key_name = config.hyperkey.watch_keycode.clone();
     let Some(watch_keycode) = keycode::lookup(key_name.as_str()) else {
         eprintln!(
@@ -145,7 +182,6 @@ fn main() -> ExitCode {
         return ExitCode::FAILURE;
     };
 
-    let router = Router::build(&config);
     let state = Rc::new(RefCell::new(DaemonState::new(config)));
 
     println!(
@@ -178,7 +214,7 @@ fn main() -> ExitCode {
     println!(
         "hyperwm-daemon: watching \"{key_name}\" (keycode {watch_keycode}) as the hyperkey"
     );
-    let dispatch = AssertSend((Rc::clone(&state), router));
+    let dispatch = AssertSend(Rc::clone(&state));
     let watcher = hyperkey::install(
         watch_keycode,
         |active| println!("hyper-active: {active}"),
@@ -186,12 +222,19 @@ fn main() -> ExitCode {
             // Matching on `&dispatch` (not `&dispatch.0`) makes the closure
             // capture the whole `AssertSend` wrapper rather than its inner
             // field directly (Rust 2021's per-field capture would otherwise
-            // capture the non-`Send` tuple and defeat the wrapper).
-            let AssertSend((state, router)) = &dispatch;
-            if let Some(action) = router.action_for(event.keycode, event.shift) {
+            // capture the non-`Send` `Rc` directly and defeat the wrapper).
+            let AssertSend(state) = &dispatch;
+            // Two separate short-lived borrows (an owned `Option<Action>`/
+            // `Option<PathBuf>` each, not a live reference into
+            // `DaemonState`) rather than one -- `Self::dispatch` below needs
+            // its own `borrow_mut()`, and `RefCell` panics on overlapping
+            // borrows.
+            let action = state.borrow().action_for(event.keycode, event.shift);
+            if let Some(action) = action {
                 state.borrow_mut().dispatch(action);
-            } else if let Some(script_path) = router.script_for(event.keycode, event.shift) {
-                script::run(script_path);
+            } else if let Some(script_path) = state.borrow().script_for(event.keycode, event.shift)
+            {
+                script::run(&script_path);
             }
         },
     );
@@ -243,17 +286,28 @@ fn main() -> ExitCode {
         state.borrow_mut().handle_space_change();
     });
 
+    // Serves `hyperwm reload`/`status` (build unit 7, architecture.md §6)
+    // over the socket bound above. Attached to this same `CFRunLoop`, same
+    // reasoning as every other watcher here: `DaemonState` lives behind a
+    // non-`Send` `Rc<RefCell<_>>` on purpose (see `AssertSend`'s doc
+    // comment above), so serving the socket from a real second thread would
+    // need a `Send` bridge back into it this daemon deliberately doesn't
+    // have. See `socket.rs`'s module doc for the polling design.
+    let socket_watcher = socket::watch(socket_listener, Rc::clone(&state), path.clone());
+
     println!("hyperwm-daemon: running");
     CFRunLoop::run_current();
 
     // Unreachable under normal operation (the run loop above never
     // returns); keeps `watcher`/`launch_watcher`/`mouse_watcher`/
-    // `space_watcher` alive for the daemon's entire lifetime instead of
-    // being dropped (and disabled) right after `install`/
-    // `watch_app_launches`/`watch_space_changes` return.
+    // `space_watcher`/`socket_watcher` alive for the daemon's entire
+    // lifetime instead of being dropped (and disabled) right after
+    // `install`/`watch_app_launches`/`watch_space_changes`/`socket::watch`
+    // return.
     drop(watcher);
     drop(launch_watcher);
     drop(mouse_watcher);
     drop(space_watcher);
+    drop(socket_watcher);
     ExitCode::SUCCESS
 }

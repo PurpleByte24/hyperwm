@@ -9,6 +9,7 @@
 mod action;
 mod error;
 mod keybind;
+pub mod protocol;
 mod raw;
 mod validate;
 

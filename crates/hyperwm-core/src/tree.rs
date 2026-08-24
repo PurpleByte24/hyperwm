@@ -207,6 +207,27 @@ impl Tree {
         self.root.as_ref().is_some_and(|r| contains(r, id))
     }
 
+    /// Updates the thresholds `insert` uses going forward
+    /// (`max_tiled_windows`, `insert_heuristic`, `split_ratio_default`)
+    /// without touching `root` -- every currently tiled window keeps its
+    /// exact leaf and computed rect; only a *future* `insert` call sees the
+    /// new values. This is what `hyperwm reload` (architecture.md §6)
+    /// needs: config values apply "going forward" without tearing down or
+    /// rebuilding the tree. In particular, lowering `max_tiled_windows`
+    /// below the tree's current `tiled_count()` does not evict anything --
+    /// there is no eviction rule anywhere in this crate, only a gate on
+    /// insertion.
+    pub fn set_config(
+        &mut self,
+        max_tiled_windows: usize,
+        insert_heuristic: InsertHeuristic,
+        split_ratio_default: f64,
+    ) {
+        self.max_tiled_windows = max_tiled_windows;
+        self.insert_heuristic = insert_heuristic;
+        self.split_ratio_default = split_ratio_default;
+    }
+
     #[must_use]
     pub fn window_ids(&self) -> Vec<WindowId> {
         let mut out = Vec::new();
@@ -1124,6 +1145,33 @@ mod tests {
     // is the insertion target -- same convention as move_direction's tie-
     // break (§3.5 step 5), and what makes symmetric_2x2_grid's leaf
     // choices deterministic above rather than incidental.
+    // Covers `set_config`, which `hyperwm reload` (architecture.md §6)
+    // relies on: existing tiled windows must keep their exact positions
+    // across a reload even when the cap changes, and the new cap must only
+    // gate *future* insertions.
+    #[test]
+    fn set_config_applies_new_cap_only_to_future_inserts() {
+        let mut t = tree(2);
+        let (w1, w2, w3) = (id(1), id(2), id(3));
+        t.insert(w1, SCREEN, NO_GAPS);
+        t.insert(w2, SCREEN, NO_GAPS);
+        let before = t.layout(SCREEN, NO_GAPS);
+
+        // Lower the cap below the current tiled_count(): nothing is
+        // evicted, nothing moves.
+        t.set_config(1, InsertHeuristic::AspectRatio, 0.5);
+        assert_eq!(t.layout(SCREEN, NO_GAPS), before);
+        assert_eq!(t.tiled_count(), 2);
+
+        // But the new (lower) cap does apply to the next insertion.
+        assert_eq!(t.insert(w3, SCREEN, NO_GAPS), InsertOutcome::CapReached);
+
+        // Raising the cap again immediately allows a new window in.
+        t.set_config(3, InsertHeuristic::AspectRatio, 0.5);
+        assert_eq!(t.insert(w3, SCREEN, NO_GAPS), InsertOutcome::Inserted);
+        assert_eq!(t.tiled_count(), 3);
+    }
+
     #[test]
     fn insert_tie_break_picks_lowest_window_id() {
         let mut t = tree(4);

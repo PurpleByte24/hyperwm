@@ -287,6 +287,87 @@ change originated from a hyperkey action or externally (e.g. the user opens
 a new document window, or quits an app). This is not optional and is
 unaffected by the tiled/floating distinction above.
 
+### 3.11 Space switching
+
+There is no reliable public API for stable per-window Space identity
+(`kCGWindowWorkspace` is deprecated since macOS 10.8 and not populated on
+modern macOS; the only real per-window→Space mapping is via private
+SkyLight/CGS calls, which are out of scope per §7). hyperwm therefore does
+not maintain a persistent tree per Space. Instead, it uses a lighter,
+stateless-by-default approach built entirely on `optionOnScreenOnly`
+enumeration, on a fixed poll interval (0.5s).
+
+**Not event-driven.** The natural public-API mechanism for this is
+`NSWorkspace.activeSpaceDidChangeNotification`, and that was the original
+design. In practice, confirmed by running the real daemon and repeatedly
+switching Spaces, that notification never fires for this daemon at all —
+not after establishing a window-server connection via `NSApplication`, not
+after setting an `.accessory` activation policy and calling
+`finishLaunching`, not after explicit main-queue delivery, and not after
+granting Screen Recording. The most likely remaining explanation is that
+this notification requires a proper Launch-Services-registered `.app`
+bundle, which a bare `cargo run`/CLI executable isn't (that's build unit
+8's packaging work, not done as of this writing). Polling needs no
+bundling and is fully public API, so hyperwm-macos's
+`workspace::watch_space_changes` polls instead, at the cost of up to the
+poll interval's worth of latency recognizing a switch — never a
+correctness issue, since step 3 below never writes to AX either way, so a
+slightly-late passive adopt/no-op is harmless. If a future packaging pass
+(build unit 8) resolves the underlying notification issue, switching back
+to an event-driven watch is a candidate follow-up, not a behavioral
+change to anything below.
+
+**On a Space switch** (i.e. each time the poll notices the on-screen
+window set differs from what's currently active):
+
+1. Enumerate the currently on-screen windows
+   (`kCGWindowListOptionOnScreenOnly`). This is always exactly "whatever
+   Space is now active," with no Space-ID bookkeeping required.
+2. Check a lightweight in-memory cache, keyed by the current on-screen
+   window set (window IDs), for a previously-seen layout matching that
+   exact set. If found, and the windows' current on-screen rects already
+   match that cached layout within tolerance, do nothing. This is the
+   cheap, common-case path — most Space visits are to a Space you were
+   just on, unchanged.
+3. If there's no cache hit, or the current rects don't match the cached
+   layout: hyperwm does **not** automatically recompute or move anything.
+   It leaves the current on-screen arrangement as-is, whatever it is
+   (already-tiled-looking, ad-hoc, freshly opened windows, doesn't
+   matter), and simply adopts that arrangement as the new known state
+   going forward (subsequent hyperkey actions, drift correction, etc. all
+   operate against it as found).
+4. Whenever a layout is established or changes (via step 3 adoption, or
+   via any hyperkey action), cache it against the current window-ID set for
+   future fast-path matching in step 2.
+
+**Auto-tile keybind.** Since hyperwm does not automatically force a fresh
+computed layout on an unrecognized Space (step 3 above is deliberately
+passive), the user has an explicit keybind — bound in
+`[keybinds]` as `"hyper+<key>" = "auto_tile"` (exact key left to the user's
+config, no default reserved yet) — that forces the current on-screen
+window set (up to `max_tiled_windows`) into a freshly computed tree layout
+immediately, using the same insertion rule as §3.3 (largest-on-screen-area
+leaf, split per `insert_heuristic`), applied in on-screen enumeration
+order. This is the explicit, user-triggered escape hatch for "this Space
+doesn't look right, make it look right" — it is never invoked
+automatically by hyperwm itself, including on first visit to a new Space.
+
+**No resizing during passive adoption (step 3).** Because hyperwm cannot
+distinguish "this Space's windows are already correctly tiled" from "this
+Space has an ad-hoc arrangement the user wants left alone" without a
+persistent tree to compare against, step 3 never resizes or repositions
+anything on its own. The only way tiling is forcibly applied to an
+unrecognized Space's windows is the explicit `auto_tile` keybind above.
+
+**Explicit non-goals carried over from this design**: no true persistent
+per-Space tree state across arbitrarily long absences from a Space: if a
+Space's window set or arrangement changes while hyperwm isn't observing it
+(e.g. another tool moved something, or this is genuinely the first visit),
+there is no "remembered original layout" to restore — only whatever the
+cache last captured for that exact window-ID set. Multi-display Space
+sequencing and windows dragged between Spaces mid-session remain out of
+scope, per the existing non-goals in §7.
+
 ---
 
 ## 4. Gaps
@@ -345,7 +426,11 @@ implementation:
 - No private/undocumented macOS APIs (no SkyLight, no SIP-partial-disable
   dependent features). Public Accessibility API and CGEventTap only.
 - No cross-platform support.
-- No space-switching automation / space-aware window movement across spaces.
+- No persistent per-Space tree state or stable Space identity (see §3.11 —
+  not achievable with public APIs; hyperwm uses cache-by-window-set instead).
+- No automatic window movement between Spaces, and no support for a window
+  being dragged between Spaces mid-session by the user.
+- No multi-display Space sequencing awareness.
 - No animation of window movement/resizing (instant reposition only).
 - No GUI/menu-bar app — CLI + daemon only.
 - No automatic promotion of floating windows back into the tiling tree on

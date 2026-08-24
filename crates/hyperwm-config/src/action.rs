@@ -15,6 +15,7 @@ pub enum Action {
     ResizeDown,
     ResizeUp,
     ResizeRight,
+    AutoTile,
 }
 
 impl Action {
@@ -30,6 +31,7 @@ impl Action {
             "resize_down" => Self::ResizeDown,
             "resize_up" => Self::ResizeUp,
             "resize_right" => Self::ResizeRight,
+            "auto_tile" => Self::AutoTile,
             _ => return None,
         })
     }
@@ -47,6 +49,7 @@ impl Action {
             Self::ResizeDown => "resize_down",
             Self::ResizeUp => "resize_up",
             Self::ResizeRight => "resize_right",
+            Self::AutoTile => "auto_tile",
         }
     }
 }

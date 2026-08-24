@@ -125,6 +125,13 @@ float_move_step = 40
 "hyper+shift+k" = "resize_up"
 "hyper+shift+l" = "resize_right"
 
+# Forces the current on-screen window set (up to max_tiled_windows) into a
+# freshly computed tree layout, immediately. hyperwm never does this on its
+# own when switching to a Space it doesn't recognize (architecture.md
+# §3.11) -- this is the explicit "make it look right" escape hatch. No
+# default keybind is reserved for it; bind it to whatever key you like.
+"hyper+t" = "auto_tile"
+
 # ─────────────────────────────────────────────────────────────────────────
 # Scripts
 # ─────────────────────────────────────────────────────────────────────────

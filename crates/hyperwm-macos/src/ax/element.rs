@@ -17,6 +17,7 @@ use accessibility_sys::{
 };
 use core_foundation::array::CFArray;
 use core_foundation::base::{CFRelease, CFTypeRef, TCFType};
+use core_foundation::boolean::{CFBoolean, CFBooleanRef};
 use core_foundation::string::{CFString, CFStringRef};
 use core_foundation::{declare_TCFType, impl_TCFType};
 use core_graphics::geometry::{CGPoint, CGSize};
@@ -101,6 +102,13 @@ impl AXUIElement {
         let value = self.copy_attribute_raw(attribute)?;
         let string = unsafe { CFString::wrap_under_create_rule(value as CFStringRef) };
         Ok(string.to_string())
+    }
+
+    /// A `CFBoolean`-valued attribute, e.g. `kAXMinimizedAttribute`.
+    pub fn bool_attribute(&self, attribute: &str) -> Result<bool, AXError> {
+        let value = self.copy_attribute_raw(attribute)?;
+        let boolean = unsafe { CFBoolean::wrap_under_create_rule(value as CFBooleanRef) };
+        Ok(bool::from(boolean))
     }
 
     /// `kAXPositionAttribute`, unpacked from its `AXValue` (`CGPoint`)

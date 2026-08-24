@@ -63,6 +63,11 @@
 //!   freely -- then snap to its tree rect the moment the button is
 //!   released (architecture.md §3.10). Dragging a *floating* window
 //!   should just stay where you drop it, no correction ever.
+//! - Switching macOS Spaces should never move or resize anything on its
+//!   own (architecture.md §3.11) -- not on the first visit to a Space, not
+//!   on a return visit, ever. `hyper+t` (`auto_tile` in
+//!   examples/config.toml) is the only thing that forces the current
+//!   on-screen window set into a freshly computed layout.
 
 mod lifecycle;
 mod registry;
@@ -153,6 +158,12 @@ fn main() -> ExitCode {
     for pid in workspace::all_running_app_pids() {
         lifecycle::adopt_app(&state, pid, lifecycle::AdoptionPolicy::FloatOnly);
     }
+    // That loop just floated every pre-existing window across *every*
+    // Space (kAXWindowsAttribute has no per-Space filter); trim back down
+    // to the Space actually on screen right now so architecture.md §3.11's
+    // layout cache starts from an accurate baseline instead of one
+    // contaminated with other Spaces' windows.
+    state.borrow_mut().establish_startup_space();
 
     let launch_watcher = {
         let state = Rc::clone(&state);
@@ -213,15 +224,31 @@ fn main() -> ExitCode {
         }
     };
 
+    // Drives DaemonState::handle_space_change (architecture.md §3.11): on
+    // every Space switch, either recognizes an unchanged Space (cache hit,
+    // no-op) or passively adopts whatever's newly on screen -- never an
+    // automatic resize/reposition. `auto_tile` (bindable in [keybinds]) is
+    // the only way a fresh layout gets forced onto a Space. Poll-driven,
+    // not event-driven -- see `workspace::watch_space_changes`'s doc
+    // comment for why `NSWorkspaceActiveSpaceDidChangeNotification`
+    // (§3.11's originally specified mechanism) isn't used.
+    let space_dispatch = AssertSend(Rc::clone(&state));
+    let space_watcher = workspace::watch_space_changes(move || {
+        let AssertSend(state) = &space_dispatch;
+        state.borrow_mut().handle_space_change();
+    });
+
     println!("hyperwm-daemon: running");
     CFRunLoop::run_current();
 
     // Unreachable under normal operation (the run loop above never
-    // returns); keeps `watcher`/`launch_watcher`/`mouse_watcher` alive for
-    // the daemon's entire lifetime instead of being dropped (and
-    // disabled) right after `install`/`watch_app_launches` return.
+    // returns); keeps `watcher`/`launch_watcher`/`mouse_watcher`/
+    // `space_watcher` alive for the daemon's entire lifetime instead of
+    // being dropped (and disabled) right after `install`/
+    // `watch_app_launches`/`watch_space_changes` return.
     drop(watcher);
     drop(launch_watcher);
     drop(mouse_watcher);
+    drop(space_watcher);
     ExitCode::SUCCESS
 }

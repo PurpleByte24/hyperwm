@@ -54,7 +54,7 @@ fn example_config_parses_with_no_errors() {
         ]
     );
     assert_eq!(config.floating.new_float_placement, FloatPlacement::Cascade);
-    assert_eq!(config.keybinds.builtin.len(), 10);
+    assert_eq!(config.keybinds.builtin.len(), 11);
     assert_eq!(config.keybinds.scripts.len(), 2);
     assert!(config.scripts.dir.ends_with("examples/scripts"));
 }
@@ -329,6 +329,7 @@ fn builtin_action_names_round_trip() {
         ("resize_down", Action::ResizeDown),
         ("resize_up", Action::ResizeUp),
         ("resize_right", Action::ResizeRight),
+        ("auto_tile", Action::AutoTile),
     ] {
         assert_eq!(action.as_str(), name);
     }

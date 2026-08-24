@@ -165,6 +165,11 @@ fn layout_node(node: &Node, rect: Rect, inner_gap: f64, out: &mut Vec<(WindowId,
 
 /// One space's tiled-window tree (architecture.md §3.1). Floating windows
 /// are not represented here — they live in a flat list owned by the caller.
+///
+/// `Clone` is used by the daemon's architecture.md §3.11 layout cache to
+/// snapshot a Space's tree and restore it verbatim on a later visit — not
+/// by anything in this crate.
+#[derive(Clone)]
 pub struct Tree {
     root: Option<Node>,
     max_tiled_windows: usize,

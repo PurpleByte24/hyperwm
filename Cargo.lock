@@ -154,6 +154,7 @@ dependencies = [
  "accessibility-sys",
  "block2",
  "core-foundation",
+ "core-foundation-sys",
  "core-graphics",
  "hyperwm-core",
  "objc2",

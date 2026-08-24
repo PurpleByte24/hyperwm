@@ -9,8 +9,10 @@
 //! Action Engine (`state::DaemonState`) carries it out against real
 //! `hyperwm-core` tree state and real AX window calls.
 //!
-//! Script keybinds and CLI reload (`hyperwm reload`/`status`/`verify`) are
-//! later build units (6-7), not wired here.
+//! Script keybinds (`[keybinds.scripts]`, architecture.md §5) dispatch
+//! through `router::Router::script_for` + `script::run`, alongside the
+//! built-in actions above. CLI reload (`hyperwm reload`/`status`/`verify`)
+//! is a later build unit (7), not wired here.
 //!
 //! # Manual verification
 //!
@@ -72,6 +74,7 @@
 mod lifecycle;
 mod registry;
 mod router;
+mod script;
 mod state;
 
 use std::cell::RefCell;
@@ -187,6 +190,8 @@ fn main() -> ExitCode {
             let AssertSend((state, router)) = &dispatch;
             if let Some(action) = router.action_for(event.keycode, event.shift) {
                 state.borrow_mut().dispatch(action);
+            } else if let Some(script_path) = router.script_for(event.keycode, event.shift) {
+                script::run(script_path);
             }
         },
     );

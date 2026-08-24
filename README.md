@@ -17,12 +17,12 @@ Early development. Not yet ready for general use.
 ## Install
 
 ```sh
-brew tap yourname/hyperwm
+brew tap PurpleByte24/hyperwm
 brew install hyperwm
 ```
 
-(Once released — see [docs/installation.md](docs/installation.md) for
-current setup, including the Caps Lock remap step.)
+See [docs/installation.md](docs/installation.md) for full setup, including
+the Caps Lock remap step and permission grants.
 
 ## Configuration
 

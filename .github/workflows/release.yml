@@ -20,6 +20,9 @@ jobs:
     # below is built by cross-compiling from here via an added rustup
     # target, not a second runner.
     runs-on: macos-14
+    outputs:
+      version: ${{ steps.package.outputs.version }}
+      sha256: ${{ steps.package.outputs.sha256 }}
     steps:
       - uses: actions/checkout@v4
 
@@ -57,13 +60,17 @@ jobs:
           done
 
       - name: Package release tarball
+        id: package
         run: |
           set -euo pipefail
           version="${GITHUB_REF_NAME#v}"
           tarball="hyperwm-${version}-macos-universal.tar.gz"
           tar -czf "$tarball" -C dist hyperwm hyperwm-daemon
           shasum -a 256 "$tarball" > "$tarball.sha256"
+          sha256="$(cut -d' ' -f1 "$tarball.sha256")"
           echo "TARBALL=$tarball" >> "$GITHUB_ENV"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "sha256=$sha256" >> "$GITHUB_OUTPUT"
 
       - name: Create GitHub release
         env:
@@ -74,3 +81,57 @@ jobs:
             "$TARBALL" "$TARBALL.sha256" \
             --title "$GITHUB_REF_NAME" \
             --generate-notes
+
+  update-homebrew-tap:
+    # Keeps PurpleByte24/homebrew-hyperwm's Formula/hyperwm.rb in sync with
+    # each release, so it no longer needs to be hand-edited (new sha256,
+    # url, commit, push) after every tag. Needs a token with write access
+    # to that *separate* repo -- the default GITHUB_TOKEN above is scoped
+    # to this repo only. See docs/installation.md for the tap's role.
+    needs: release
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out homebrew-hyperwm
+        uses: actions/checkout@v4
+        with:
+          repository: PurpleByte24/homebrew-hyperwm
+          token: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+          path: tap
+
+      - name: Update formula
+        run: |
+          set -euo pipefail
+          version="${{ needs.release.outputs.version }}"
+          sha256="${{ needs.release.outputs.sha256 }}"
+          url="https://github.com/${{ github.repository }}/releases/download/v${version}/hyperwm-${version}-macos-universal.tar.gz"
+          formula="tap/Formula/hyperwm.rb"
+
+          sed -i -E "s|^(  url \")[^\"]*(\")|\1${url}\2|" "$formula"
+          sed -i -E "s|^(  sha256 \")[^\"]*(\")|\1${sha256}\2|" "$formula"
+
+          grep -qF -- "$url" "$formula" || {
+            echo "::error::couldn't find/update the 'url' line in $formula -- check its format matches a standard 'brew create'-style formula" >&2
+            exit 1
+          }
+          grep -qF -- "$sha256" "$formula" || {
+            echo "::error::couldn't find/update the 'sha256' line in $formula" >&2
+            exit 1
+          }
+          grep -E '^  (url|sha256) ' "$formula"
+
+      - name: Commit and push
+        working-directory: tap
+        env:
+          GIT_AUTHOR_NAME: hyperwm-release-bot
+          GIT_AUTHOR_EMAIL: actions@users.noreply.github.com
+          GIT_COMMITTER_NAME: hyperwm-release-bot
+          GIT_COMMITTER_EMAIL: actions@users.noreply.github.com
+        run: |
+          set -euo pipefail
+          git add Formula/hyperwm.rb
+          if git diff --cached --quiet; then
+            echo "formula already up to date, nothing to commit"
+            exit 0
+          fi
+          git commit -m "hyperwm ${{ needs.release.outputs.version }}"
+          git push

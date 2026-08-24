@@ -14,9 +14,9 @@
 //! keypress is free again as soon as [`run`] returns, well before the
 //! script (or the thread waiting on it) finishes.
 
-use std::io;
+use std::io::{self, BufRead, BufReader};
 use std::path::Path;
-use std::process::{Child, Command, ExitStatus, Output, Stdio};
+use std::process::{Child, Command, ExitStatus, Stdio};
 use std::thread::{self, JoinHandle};
 
 /// Spawns `path` as a detached child process and logs its stderr / a
@@ -33,43 +33,65 @@ pub fn run(path: &Path) {
 
 /// Does the actual spawn + hand-off to a reaping thread. Split out from
 /// [`run`] so tests can join the returned handle and assert on the
-/// [`Output`] it produces, instead of scraping stderr log lines.
-fn spawn(path: &Path) -> io::Result<JoinHandle<Output>> {
+/// [`ExitStatus`] it produces.
+fn spawn(path: &Path) -> io::Result<JoinHandle<ExitStatus>> {
     let child = Command::new(path)
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::piped())
         .spawn()?;
     let path = path.to_path_buf();
-    Ok(thread::spawn(move || reap(child, &path)))
+    Ok(thread::spawn(move || {
+        let mut child = child;
+        reap(&mut child, &path, log_stderr_line)
+    }))
 }
 
-/// Waits for `child` to exit, logging its stderr and a non-zero exit code
-/// (architecture.md §5) -- but not stdout, which §5 doesn't ask the daemon
-/// to log and which the script's own hyper-key trigger already implies the
-/// user doesn't need surfaced (it's not a query for output).
-fn reap(child: Child, path: &Path) -> Output {
-    let output = child.wait_with_output().unwrap_or_else(|err| {
+fn log_stderr_line(path: &Path, line: &str) {
+    eprintln!("hyperwm-daemon: script {} stderr: {line}", path.display());
+}
+
+/// Streams `child`'s stderr to `on_line` one line at a time as it's
+/// produced (architecture.md §5's "log the script's stderr"), then waits
+/// for exit and logs a non-zero code. Deliberately *not*
+/// `wait_with_output()`, which buffers the whole pipe and only hands it
+/// back once the process has already exited -- for a script that logs
+/// progress and then runs long (e.g. "starting..." followed by a slow
+/// step), that would silently hold the "starting..." line back until the
+/// script was already done, making a merely-slow script look stuck rather
+/// than logging its own progress live. `on_line` is a parameter (rather
+/// than always `eprintln!`) purely so tests can observe *when* a line
+/// arrives, not just its content -- production always passes
+/// [`log_stderr_line`].
+fn reap(child: &mut Child, path: &Path, mut on_line: impl FnMut(&Path, &str)) -> ExitStatus {
+    if let Some(stderr) = child.stderr.take() {
+        for line in BufReader::new(stderr).lines() {
+            match line {
+                Ok(line) => on_line(path, &line),
+                Err(err) => {
+                    eprintln!(
+                        "hyperwm-daemon: couldn't read stderr from script {}: {err}",
+                        path.display()
+                    );
+                    break;
+                }
+            }
+        }
+    }
+    let status = child.wait().unwrap_or_else(|err| {
         eprintln!("hyperwm-daemon: couldn't wait on script {}: {err}", path.display());
-        // wait_with_output() only fails if the initial OS wait call itself
-        // errors (not on a non-zero exit, which is Ok(_) with a failing
-        // ExitStatus) -- effectively unreachable once spawn() has already
-        // succeeded, but a placeholder failing status lets this stay a
-        // total function instead of dragging an Option/panic through
-        // `run`'s otherwise-infallible fire-and-forget path.
-        Output { status: ExitStatus::default(), stdout: Vec::new(), stderr: Vec::new() }
+        // wait() only fails if the OS wait call itself errors (not on a
+        // non-zero exit, which is Ok(_) with a failing ExitStatus) --
+        // effectively unreachable once spawn() has already succeeded, but
+        // a placeholder failing status lets this stay a total function
+        // instead of dragging an Option/panic through `run`'s otherwise-
+        // infallible fire-and-forget path.
+        ExitStatus::default()
     });
-    if !output.stderr.is_empty() {
-        eprintln!(
-            "hyperwm-daemon: script {} wrote to stderr:\n{}",
-            path.display(),
-            String::from_utf8_lossy(&output.stderr)
-        );
+    if !status.success() {
+        eprintln!("hyperwm-daemon: script {} exited with {status}", path.display());
     }
-    if !output.status.success() {
-        eprintln!("hyperwm-daemon: script {} exited with {}", path.display(), output.status);
-    }
-    output
+    status
 }
 
 #[cfg(test)]
@@ -77,6 +99,8 @@ mod tests {
     use super::*;
     use std::fs;
     use std::os::unix::fs::PermissionsExt;
+    use std::sync::mpsc;
+    use std::time::{Duration, Instant};
 
     /// A directory under the OS temp dir, unique to this test process and
     /// test name, freshly emptied -- same convention as
@@ -100,13 +124,12 @@ mod tests {
     }
 
     #[test]
-    fn successful_script_is_reaped_with_empty_stderr() {
+    fn successful_script_exits_cleanly() {
         let dir = scratch_dir("success");
         let script = write_script(&dir, "ok.sh", "#!/bin/sh\nexit 0\n");
 
-        let output = spawn(&script).unwrap().join().unwrap();
-        assert!(output.status.success());
-        assert!(output.stderr.is_empty());
+        let status = spawn(&script).unwrap().join().unwrap();
+        assert!(status.success());
     }
 
     #[test]
@@ -114,19 +137,48 @@ mod tests {
         let dir = scratch_dir("nonzero-exit");
         let script = write_script(&dir, "fail.sh", "#!/bin/sh\nexit 7\n");
 
-        let output = spawn(&script).unwrap().join().unwrap();
-        assert!(!output.status.success());
-        assert_eq!(output.status.code(), Some(7));
+        let status = spawn(&script).unwrap().join().unwrap();
+        assert!(!status.success());
+        assert_eq!(status.code(), Some(7));
     }
 
     #[test]
-    fn stderr_output_is_captured() {
-        let dir = scratch_dir("stderr-output");
-        let script = write_script(&dir, "loud.sh", "#!/bin/sh\necho oops >&2\nexit 0\n");
+    fn stderr_lines_are_logged_as_they_arrive_not_buffered_until_exit() {
+        let dir = scratch_dir("streamed-stderr");
+        let script = write_script(
+            &dir,
+            "streamed.sh",
+            "#!/bin/sh\necho first >&2\nsleep 3\necho second >&2\nexit 0\n",
+        );
 
-        let output = spawn(&script).unwrap().join().unwrap();
-        assert!(output.status.success());
-        assert_eq!(String::from_utf8_lossy(&output.stderr).trim(), "oops");
+        let mut child = Command::new(&script)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap();
+        let (tx, rx) = mpsc::channel();
+        let path = script.clone();
+        let handle = thread::spawn(move || {
+            reap(&mut child, &path, move |_, line| {
+                let _ = tx.send((line.to_string(), Instant::now()));
+            })
+        });
+
+        let started = Instant::now();
+        let (first_line, first_at) = rx
+            .recv_timeout(Duration::from_secs(1))
+            .expect("first stderr line should arrive well before the 3s sleep finishes");
+        assert_eq!(first_line, "first");
+        assert!(
+            first_at.duration_since(started) < Duration::from_secs(1),
+            "first line was held back instead of streamed"
+        );
+
+        let (second_line, _) = rx.recv_timeout(Duration::from_secs(5)).unwrap();
+        assert_eq!(second_line, "second");
+
+        assert!(handle.join().unwrap().success());
     }
 
     #[test]
@@ -134,10 +186,10 @@ mod tests {
         let dir = scratch_dir("slow-script");
         let script = write_script(&dir, "slow.sh", "#!/bin/sh\nsleep 5\nexit 0\n");
 
-        let started = std::time::Instant::now();
+        let started = Instant::now();
         run(&script);
         assert!(
-            started.elapsed() < std::time::Duration::from_secs(1),
+            started.elapsed() < Duration::from_secs(1),
             "run() must return immediately, not wait on the script"
         );
     }

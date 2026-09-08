@@ -46,6 +46,7 @@ use hyperwm_macos::{identity, screen};
 
 use crate::registry::WindowRegistry;
 use crate::router::Router;
+use crate::telog;
 
 /// Fixed cascade offset (architecture.md §3.9's `new_float_placement =
 /// "cascade"`) applied per already-floating window, wrapping after this
@@ -273,7 +274,7 @@ impl DaemonState {
 
     fn watch(&self, pid: pid_t, window: &AXUIElement, notification: &str) {
         let Some(observer) = self.app_observers.get(&pid) else {
-            eprintln!(
+            telog!(
                 "hyperwm-daemon: no AXObserver for pid {pid}, can't watch {notification} \
                  (this means adopt_app wasn't called for it -- a bug, not a transient AX error)"
             );
@@ -286,7 +287,7 @@ impl DaemonState {
             // its module doc); `handle_drift` already no-ops for anything
             // not in the tree, so this is harmless, just noisy if logged.
             if err != accessibility_sys::kAXErrorNotificationAlreadyRegistered {
-                eprintln!(
+                telog!(
                     "hyperwm-daemon: couldn't watch {notification} on pid {pid}: {}",
                     accessibility_sys::error_string(err)
                 );

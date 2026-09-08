@@ -53,6 +53,7 @@ use std::rc::Rc;
 use hyperwm_config::protocol::{self, Request, Response};
 
 use crate::state::DaemonState;
+use crate::{telog, tlog};
 
 /// How often the listener is checked for a pending connection. Small
 /// enough that `hyperwm reload`/`status`, run interactively by a human,
@@ -213,7 +214,7 @@ fn poll_once(listener: &UnixListener, state: &Rc<RefCell<DaemonState>>, config_p
             Ok((stream, _addr)) => handle_connection(stream, state, config_path),
             Err(err) if err.kind() == io::ErrorKind::WouldBlock => break,
             Err(err) => {
-                eprintln!("hyperwm-daemon: socket accept error: {err}");
+                telog!("hyperwm-daemon: socket accept error: {err}");
                 break;
             }
         }
@@ -226,7 +227,7 @@ fn handle_connection(stream: UnixStream, state: &Rc<RefCell<DaemonState>>, confi
     let read_stream = match stream.try_clone() {
         Ok(s) => s,
         Err(err) => {
-            eprintln!("hyperwm-daemon: couldn't clone accepted socket connection: {err}");
+            telog!("hyperwm-daemon: couldn't clone accepted socket connection: {err}");
             return;
         }
     };
@@ -236,7 +237,7 @@ fn handle_connection(stream: UnixStream, state: &Rc<RefCell<DaemonState>>, confi
         Ok(Some(request)) => request,
         Ok(None) => return, // Client disconnected without sending anything.
         Err(err) => {
-            eprintln!("hyperwm-daemon: malformed request on socket: {err}");
+            telog!("hyperwm-daemon: malformed request on socket: {err}");
             return;
         }
     };
@@ -245,7 +246,7 @@ fn handle_connection(stream: UnixStream, state: &Rc<RefCell<DaemonState>>, confi
 
     let mut writer = stream;
     if let Err(err) = protocol::write_message(&mut writer, &response) {
-        eprintln!("hyperwm-daemon: couldn't write socket response: {err}");
+        telog!("hyperwm-daemon: couldn't write socket response: {err}");
     }
 }
 
@@ -275,7 +276,7 @@ fn handle_reload(state: &Rc<RefCell<DaemonState>>, config_path: &Path) -> Respon
             let builtin_keybinds = config.keybinds.builtin.len();
             let script_keybinds = config.keybinds.scripts.len();
             state.borrow_mut().reload_config(config);
-            println!(
+            tlog!(
                 "hyperwm-daemon: reloaded {} ({builtin_keybinds} built-in keybinds, \
                  {script_keybinds} script keybinds)",
                 config_path.display()
@@ -283,7 +284,7 @@ fn handle_reload(state: &Rc<RefCell<DaemonState>>, config_path: &Path) -> Respon
             Response::Reloaded { builtin_keybinds, script_keybinds }
         }
         Err(err) => {
-            eprintln!(
+            telog!(
                 "hyperwm-daemon: reload rejected ({} is invalid), keeping the previous config \
                  running: {err}",
                 config_path.display()

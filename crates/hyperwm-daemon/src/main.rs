@@ -85,6 +85,7 @@
 //!   full CLI-side checklist.
 
 mod lifecycle;
+mod log;
 mod registry;
 mod router;
 mod script;
@@ -111,7 +112,7 @@ unsafe impl<T> Send for AssertSend<T> {}
 
 fn main() -> ExitCode {
     let Some(path) = hyperwm_config::default_config_path() else {
-        eprintln!(
+        telog!(
             "hyperwm-daemon: no config file found (checked ~/.config/hyperwm/config.toml \
              and ~/.hyperwm/config.toml)"
         );
@@ -120,7 +121,7 @@ fn main() -> ExitCode {
 
     let config = match hyperwm_config::load(&path) {
         Ok(config) => {
-            println!(
+            tlog!(
                 "hyperwm-daemon: loaded {} ({} built-in keybinds, {} script keybinds)",
                 path.display(),
                 config.keybinds.builtin.len(),
@@ -129,7 +130,7 @@ fn main() -> ExitCode {
             config
         }
         Err(err) => {
-            eprintln!(
+            telog!(
                 "hyperwm-daemon: invalid config at {}: {err}",
                 path.display()
             );
@@ -139,14 +140,14 @@ fn main() -> ExitCode {
 
     let status = permissions::check();
     if !status.all_granted() {
-        eprintln!(
+        telog!(
             "hyperwm-daemon: missing required permission(s); grant these, then restart \
              hyperwm-daemon:\n{}",
             status.instructions()
         );
         return ExitCode::FAILURE;
     }
-    println!("hyperwm-daemon: Accessibility and Input Monitoring permissions granted");
+    tlog!("hyperwm-daemon: Accessibility and Input Monitoring permissions granted");
 
     // Bound early and fail-fast, before touching any window-server state:
     // if another hyperwm-daemon instance is already running, there's
@@ -156,7 +157,7 @@ fn main() -> ExitCode {
     let socket_listener = match socket::bind(&hyperwm_config::protocol::socket_path()) {
         Ok(listener) => listener,
         Err(socket::BindError::AlreadyRunning) => {
-            eprintln!(
+            telog!(
                 "hyperwm-daemon: another instance is already running (socket at {} is live) \
                  -- not starting a second one",
                 hyperwm_config::protocol::socket_path().display()
@@ -164,7 +165,7 @@ fn main() -> ExitCode {
             return ExitCode::FAILURE;
         }
         Err(socket::BindError::Io(err)) => {
-            eprintln!(
+            telog!(
                 "hyperwm-daemon: couldn't bind the CLI socket at {}: {err}",
                 hyperwm_config::protocol::socket_path().display()
             );
@@ -174,7 +175,7 @@ fn main() -> ExitCode {
 
     let key_name = config.hyperkey.watch_keycode.clone();
     let Some(watch_keycode) = keycode::lookup(key_name.as_str()) else {
-        eprintln!(
+        telog!(
             "hyperwm-daemon: hyperkey.watch_keycode \"{key_name}\" has no known macOS virtual \
              keycode mapping (this can happen for f21-f24, which macOS doesn't assign a \
              keycode to); pick a different key in the config"
@@ -184,7 +185,7 @@ fn main() -> ExitCode {
 
     let state = Rc::new(RefCell::new(DaemonState::new(config)));
 
-    println!(
+    tlog!(
         "hyperwm-daemon: registering already-running apps' windows (left floating -- \
          hyper+f to tile one; only windows opened from here on tile automatically)"
     );
@@ -211,13 +212,13 @@ fn main() -> ExitCode {
         })
     };
 
-    println!(
+    tlog!(
         "hyperwm-daemon: watching \"{key_name}\" (keycode {watch_keycode}) as the hyperkey"
     );
     let dispatch = AssertSend(Rc::clone(&state));
     let watcher = hyperkey::install(
         watch_keycode,
-        |active| println!("hyper-active: {active}"),
+        |active| tlog!("hyper-active: {active}"),
         move |event| {
             // Matching on `&dispatch` (not `&dispatch.0`) makes the closure
             // capture the whole `AssertSend` wrapper rather than its inner
@@ -241,7 +242,7 @@ fn main() -> ExitCode {
     let watcher = match watcher {
         Ok(watcher) => watcher,
         Err(err) => {
-            eprintln!(
+            telog!(
                 "hyperwm-daemon: {err} -- was reported granted at startup, so try restarting \
                  the daemon, or re-check System Settings > Privacy & Security > Input \
                  Monitoring"
@@ -263,7 +264,7 @@ fn main() -> ExitCode {
     let mouse_watcher = match mouse_watcher {
         Ok(watcher) => watcher,
         Err(err) => {
-            eprintln!(
+            telog!(
                 "hyperwm-daemon: {err} -- was reported granted at startup, so try restarting \
                  the daemon, or re-check System Settings > Privacy & Security > Input \
                  Monitoring"
@@ -295,7 +296,7 @@ fn main() -> ExitCode {
     // have. See `socket.rs`'s module doc for the polling design.
     let socket_watcher = socket::watch(socket_listener, Rc::clone(&state), path.clone());
 
-    println!("hyperwm-daemon: running");
+    tlog!("hyperwm-daemon: running");
     CFRunLoop::run_current();
 
     // Unreachable under normal operation (the run loop above never

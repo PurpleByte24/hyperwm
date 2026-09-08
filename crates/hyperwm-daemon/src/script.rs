@@ -19,11 +19,13 @@ use std::path::Path;
 use std::process::{Child, Command, ExitStatus, Stdio};
 use std::thread::{self, JoinHandle};
 
+use crate::telog;
+
 /// Spawns `path` as a detached child process and logs its stderr / a
 /// non-zero exit code once it finishes, without blocking the caller.
 pub fn run(path: &Path) {
     if let Err(err) = spawn(path) {
-        eprintln!("hyperwm-daemon: couldn't spawn script {}: {err}", path.display());
+        telog!("hyperwm-daemon: couldn't spawn script {}: {err}", path.display());
     }
     // The returned `JoinHandle` is intentionally dropped here rather than
     // joined: dropping it detaches the reaping thread instead of waiting
@@ -48,7 +50,7 @@ fn spawn(path: &Path) -> io::Result<JoinHandle<ExitStatus>> {
 }
 
 fn log_stderr_line(path: &Path, line: &str) {
-    eprintln!("hyperwm-daemon: script {} stderr: {line}", path.display());
+    telog!("hyperwm-daemon: script {} stderr: {line}", path.display());
 }
 
 /// Streams `child`'s stderr to `on_line` one line at a time as it's
@@ -60,7 +62,7 @@ fn log_stderr_line(path: &Path, line: &str) {
 /// step), that would silently hold the "starting..." line back until the
 /// script was already done, making a merely-slow script look stuck rather
 /// than logging its own progress live. `on_line` is a parameter (rather
-/// than always `eprintln!`) purely so tests can observe *when* a line
+/// than always `telog!`) purely so tests can observe *when* a line
 /// arrives, not just its content -- production always passes
 /// [`log_stderr_line`].
 fn reap(child: &mut Child, path: &Path, mut on_line: impl FnMut(&Path, &str)) -> ExitStatus {
@@ -69,7 +71,7 @@ fn reap(child: &mut Child, path: &Path, mut on_line: impl FnMut(&Path, &str)) ->
             match line {
                 Ok(line) => on_line(path, &line),
                 Err(err) => {
-                    eprintln!(
+                    telog!(
                         "hyperwm-daemon: couldn't read stderr from script {}: {err}",
                         path.display()
                     );
@@ -79,7 +81,7 @@ fn reap(child: &mut Child, path: &Path, mut on_line: impl FnMut(&Path, &str)) ->
         }
     }
     let status = child.wait().unwrap_or_else(|err| {
-        eprintln!("hyperwm-daemon: couldn't wait on script {}: {err}", path.display());
+        telog!("hyperwm-daemon: couldn't wait on script {}: {err}", path.display());
         // wait() only fails if the OS wait call itself errors (not on a
         // non-zero exit, which is Ok(_) with a failing ExitStatus) --
         // effectively unreachable once spawn() has already succeeded, but
@@ -89,7 +91,7 @@ fn reap(child: &mut Child, path: &Path, mut on_line: impl FnMut(&Path, &str)) ->
         ExitStatus::default()
     });
     if !status.success() {
-        eprintln!("hyperwm-daemon: script {} exited with {status}", path.display());
+        telog!("hyperwm-daemon: script {} exited with {status}", path.display());
     }
     status
 }

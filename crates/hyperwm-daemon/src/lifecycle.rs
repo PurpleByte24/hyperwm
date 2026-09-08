@@ -38,6 +38,7 @@ use accessibility_sys::{
 use hyperwm_macos::ax::{AXNotification, AXUIElement, WindowObserver};
 
 use crate::state::{DaemonState, AX_WINDOW_DEMINIATURIZED_NOTIFICATION};
+use crate::telog;
 
 /// How to treat the windows [`adopt_app`] finds already open for `pid`
 /// (see this module's doc comment for the rationale).
@@ -62,7 +63,7 @@ pub fn adopt_app(state: &Rc<RefCell<DaemonState>>, pid: pid_t, policy: AdoptionP
             Ok(observer) => {
                 let app_element = AXUIElement::application(pid);
                 if let Err(err) = observer.watch(&app_element, kAXWindowCreatedNotification) {
-                    eprintln!(
+                    telog!(
                         "hyperwm-daemon: couldn't watch window creation for pid {pid}: {}",
                         accessibility_sys::error_string(err)
                     );
@@ -71,7 +72,7 @@ pub fn adopt_app(state: &Rc<RefCell<DaemonState>>, pid: pid_t, policy: AdoptionP
                 state.borrow_mut().app_observers.insert(pid, observer);
             }
             Err(err) => {
-                eprintln!("hyperwm-daemon: couldn't create AXObserver for pid {pid}: {err} \
+                telog!("hyperwm-daemon: couldn't create AXObserver for pid {pid}: {err} \
                     (its windows won't be tiling-managed until it's re-checked)");
                 return;
             }

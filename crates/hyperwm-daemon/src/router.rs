@@ -19,6 +19,8 @@ use std::path::{Path, PathBuf};
 use hyperwm_config::{Action, Config};
 use hyperwm_macos::keycode::{self, CGKeyCode};
 
+use crate::telog;
+
 pub struct Router {
     actions: HashMap<(CGKeyCode, bool), Action>,
     /// Script keybinds, pre-resolved to their full path (`config.scripts.dir`
@@ -37,7 +39,7 @@ impl Router {
                 Some(code) => {
                     actions.insert((code, keybind.shift), *action);
                 }
-                None => eprintln!(
+                None => telog!(
                     "hyperwm-daemon: keybind \"{keybind}\" has no known macOS keycode mapping, \
                      skipping (see hyperwm_macos::keycode's f21-f24 note)"
                 ),
@@ -50,7 +52,7 @@ impl Router {
                 Some(code) => {
                     scripts.insert((code, keybind.shift), config.scripts.dir.join(filename));
                 }
-                None => eprintln!(
+                None => telog!(
                     "hyperwm-daemon: keybind \"{keybind}\" has no known macOS keycode mapping, \
                      skipping (see hyperwm_macos::keycode's f21-f24 note)"
                 ),

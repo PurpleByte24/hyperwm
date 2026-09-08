@@ -48,6 +48,20 @@ jobs:
         run: cargo build --workspace --release --target x86_64-apple-darwin
 
       - name: Combine into universal binaries
+        # `lipo -create` concatenates the two independently ad-hoc-signed
+        # per-arch slices without producing a coherent signature over the
+        # combined fat file -- `codesign -dv` on the result still prints
+        # signature-looking metadata (stale, from one slice), but
+        # `codesign --verify --deep --strict` correctly calls it "not
+        # signed at all". Ad-hoc-signed CLI tools like this one (no
+        # Developer ID, no bundle) get identified in TCC's grant database
+        # by this signature -- an unsigned binary has none, so
+        # AXIsProcessTrustedWithOptions/CGRequestListenEventAccess report
+        # false for it even with a valid Accessibility/Input Monitoring
+        # grant on file, when launched via launchd (a plain interactive
+        # shell exec is more permissive and doesn't surface this). Signing
+        # the combined binary after lipo, not just each slice before it,
+        # is required.
         run: |
           set -euo pipefail
           mkdir -p dist
@@ -56,6 +70,8 @@ jobs:
               "target/aarch64-apple-darwin/release/$bin" \
               "target/x86_64-apple-darwin/release/$bin"
             chmod +x "dist/$bin"
+            codesign --force --sign - --options runtime "dist/$bin"
+            codesign --verify --deep --strict --verbose=2 "dist/$bin"
             lipo -info "dist/$bin"
           done
 

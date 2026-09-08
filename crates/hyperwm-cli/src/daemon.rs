@@ -39,12 +39,15 @@
 //!   connect ("is the daemon running?"). `hyperwm daemon stop` again
 //!   should print that it's already stopped, not error.
 //! - Log in fresh (or `launchctl bootout` + reboot) after a `start`:
-//!   the daemon should come back up on its own (`RunAtLoad`) without
-//!   running `hyperwm daemon start` again.
+//!   the daemon should **not** come back up on its own -- `RunAtLoad` is
+//!   `false` (see `write_daemon_plist`'s doc comment), so only an explicit
+//!   `hyperwm daemon start` (or a `KeepAlive`-driven respawn after a crash,
+//!   if that's ever added) should bring it up.
 //! - Inspect `~/Library/LaunchAgents/com.purplebyte24.hyperwm.daemon.plist`
 //!   after any of the above: `ProgramArguments` should point at the
 //!   `hyperwm-daemon` binary actually installed next to this `hyperwm`
-//!   binary (`which hyperwm-daemon` after a brew install should match).
+//!   binary (`which hyperwm-daemon` after a brew install should match),
+//!   and `RunAtLoad` should be `false`.
 
 use std::path::PathBuf;
 use std::process::ExitCode;
@@ -89,6 +92,10 @@ fn log_dir(home: &std::path::Path) -> Result<PathBuf, String> {
     Ok(dir)
 }
 
+/// `RunAtLoad` is `false`: unit 8 deliberately defers auto-start-at-login
+/// (unlike `install-keymap`'s LaunchAgent, whose whole point is to persist
+/// the remap across logins) -- starting the daemon is an explicit `hyperwm
+/// daemon start`, not something a login should trigger on its own.
 fn write_daemon_plist() -> Result<PathBuf, String> {
     let home = home_dir()?;
     let daemon_bin = daemon_binary_path()?;
@@ -97,7 +104,7 @@ fn write_daemon_plist() -> Result<PathBuf, String> {
         &home,
         LABEL,
         &[daemon_bin.display().to_string()],
-        true,
+        false,
         &logs.join("daemon.log"),
         &logs.join("daemon.err.log"),
     )

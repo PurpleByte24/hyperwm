@@ -98,6 +98,26 @@ jobs:
             --title "$GITHUB_REF_NAME" \
             --generate-notes
 
+      - name: Commit bumped Cargo.toml back to main
+        # Mirrors the tag-derived version (set in "Set crate version from
+        # tag" above) back onto main, so Cargo.toml on main always matches
+        # the last release instead of drifting from it. Tag remains the
+        # single source of truth; this just reflects it back.
+        env:
+          GIT_AUTHOR_NAME: hyperwm-release-bot
+          GIT_AUTHOR_EMAIL: actions@users.noreply.github.com
+          GIT_COMMITTER_NAME: hyperwm-release-bot
+          GIT_COMMITTER_EMAIL: actions@users.noreply.github.com
+        run: |
+          set -euo pipefail
+          git add Cargo.toml
+          if git diff --cached --quiet; then
+            echo "Cargo.toml already up to date, nothing to commit"
+            exit 0
+          fi
+          git commit -m "chore: bump version to ${GITHUB_REF_NAME#v}"
+          git push origin HEAD:main
+
   update-homebrew-tap:
     # Keeps PurpleByte24/homebrew-hyperwm's Formula/hyperwm.rb in sync with
     # each release, so it no longer needs to be hand-edited (new sha256,

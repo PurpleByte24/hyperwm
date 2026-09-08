@@ -131,31 +131,6 @@ trying and logging a failure for each one.
 
 ---
 
-## CLI / status output polish
-
-### `hyperwm status` visual polish
-
-Current output is plain, undifferentiated text. Wanted:
-
-- Color-coded state (e.g. daemon running vs. not, tiled vs. floating
-  window lists visually distinguished).
-- Show which config file(s) were found/considered, not just the one that
-  was loaded (useful when both `~/.config/hyperwm/config.toml` and
-  `~/.hyperwm/config.toml` exist, or neither does).
-- A polished, informative view specifically for the "daemon isn't running
-  yet" case — currently just a raw connection-refused error:
-  ```
-  hyperwm status: couldn't connect to hyperwm-daemon at
-  /var/folders/.../hyperwm.sock (Connection refused (os error 61)) --
-  is the daemon running?
-  ```
-  This should look like a deliberate, designed output (e.g. clearly
-  state the daemon isn't running, suggest `hyperwm daemon start`, maybe
-  still show which config would be used) rather than a raw error
-  message leaking through.
-
----
-
 ## Explicitly not on this list
 
 Non-goals from `docs/architecture.md` §7 (no private/undocumented APIs,

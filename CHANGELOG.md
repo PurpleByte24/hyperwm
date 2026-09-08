@@ -3,7 +3,35 @@
 All notable changes to this project are documented here.
 Format based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
-## [0.2.1] - unreleased
+## [0.3.0] - 2026-09-08
+
+### Added
+
+- `hyperwm status`: color-coded daemon state and tiled/floating window
+  lists, and every default config path considered (not just the one
+  loaded), shown with which one is actually in play
+- `hyperwm status`: a designed "daemon isn't running" view (state, config
+  paths considered, a `hyperwm daemon start` hint) in place of the raw
+  connection-refused error
+
+## [0.2.2] - 2026-09-08
+
+### Fixed
+
+- `hyperwm daemon start` no longer auto-starts the daemon at login --
+  `RunAtLoad` on the daemon's launchd plist had regressed to `true`;
+  starting the daemon is meant to stay an explicit `hyperwm daemon start`
+- `daemon.log`/`daemon.err.log` lines are now UTC-timestamped; launchd
+  redirects the daemon's stdout/stderr to these files with no timestamping
+  of its own, which made correlating them with anything else much harder
+- The release workflow now re-signs the `lipo`-combined universal binary,
+  not just each per-arch slice before combining -- the combined binary was
+  shipping unsigned, which made `hyperwm daemon start` (launched via
+  launchd) fail its Accessibility/Input Monitoring permission checks even
+  with a valid grant on file. The daemon has never actually worked when
+  installed via Homebrew and started this way until this fix.
+
+## [0.2.1] - 2026-08-24
 
 ### Fixed
 

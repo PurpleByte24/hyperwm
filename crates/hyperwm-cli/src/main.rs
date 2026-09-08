@@ -47,6 +47,7 @@
 //! - `cargo run -p hyperwm-cli -- --help` / `-h` and `--version` / `-v`
 //!   should print without needing a daemon or a config file at all.
 
+mod color;
 mod daemon;
 mod keymap;
 mod launchd;
@@ -142,7 +143,15 @@ fn connect() -> std::io::Result<UnixStream> {
 /// [`Response`], per `hyperwm_config::protocol`'s one-request-one-response
 /// wire format.
 fn call(request: &Request) -> Result<Response, String> {
-    let mut stream = connect().map_err(|err| err.to_string())?;
+    let stream = connect().map_err(|err| err.to_string())?;
+    call_on(stream, request)
+}
+
+/// Same as [`call`], but over a connection the caller already has -- lets
+/// `status` inspect a failed [`connect`]'s [`std::io::ErrorKind`] itself
+/// (to recognize "daemon isn't running" specifically) before it would
+/// otherwise get flattened into a plain `String`.
+fn call_on(mut stream: UnixStream, request: &Request) -> Result<Response, String> {
     protocol::write_message(&mut stream, request)
         .map_err(|err| format!("couldn't send request to hyperwm-daemon: {err}"))?;
 
@@ -200,28 +209,16 @@ fn status(args: &[String]) -> ExitCode {
         println!("    hyperwm status");
         return ExitCode::SUCCESS;
     }
-    match call(&Request::Status) {
+    let paint = color::Painter::detect();
+
+    let stream = match connect() {
+        Ok(stream) => stream,
+        Err(err) => return print_daemon_not_running(&paint, &err),
+    };
+
+    match call_on(stream, &Request::Status) {
         Ok(Response::Status(report)) => {
-            println!("hyperwm-daemon: running (pid {})", report.pid);
-            println!("config: {}", report.config_path);
-            println!();
-            println!("tiled ({}):", report.tiled.len());
-            for window in &report.tiled {
-                print_window(window);
-            }
-            println!();
-            println!("floating ({}):", report.floating.len());
-            for window in &report.floating {
-                print_window(window);
-            }
-            println!();
-            match &report.focused {
-                Some(window) => {
-                    print!("focused: ");
-                    print_window(window);
-                }
-                None => println!("focused: none"),
-            }
+            print_status_report(&paint, &report);
             ExitCode::SUCCESS
         }
         Ok(other) => {
@@ -235,12 +232,119 @@ fn status(args: &[String]) -> ExitCode {
     }
 }
 
-fn print_window(window: &WindowSummary) {
+fn print_status_report(paint: &color::Painter, report: &protocol::StatusReport) {
+    println!("hyperwm-daemon: {} (pid {})", paint.bold_green("running"), report.pid);
+    println!();
+    print_config_section(paint, Some(&report.config_path));
+    println!();
+    print_window_section(paint, "tiled", "36", &report.tiled);
+    println!();
+    print_window_section(paint, "floating", "33", &report.floating);
+    println!();
+    match &report.focused {
+        Some(window) => println!("focused: {} {}", paint.green("\u{25cf}"), window_line(paint, window)),
+        None => println!("focused: {}", paint.dim("none")),
+    }
+}
+
+/// The common case: `connect()` failed with `ConnectionRefused` (socket
+/// exists, nothing listening) or `NotFound` (socket file doesn't exist at
+/// all) -- in practice both just mean "the daemon isn't running". Rather
+/// than let the raw `io::Error` leak through (the pre-polish behavior:
+/// `couldn't connect to hyperwm-daemon at ... (Connection refused (os
+/// error 61)) -- is the daemon running?`), this prints a deliberate,
+/// designed status view: which config *would* be loaded, and how to start
+/// the daemon. Roadmap: "CLI / status output polish".
+fn print_daemon_not_running(paint: &color::Painter, err: &std::io::Error) -> ExitCode {
+    use std::io::ErrorKind;
+
+    println!("hyperwm-daemon: {}", paint.bold_red("not running"));
+    println!();
+    print_config_section(paint, None);
+    println!();
+    if !matches!(err.kind(), ErrorKind::ConnectionRefused | ErrorKind::NotFound) {
+        // Something other than the expected "nothing's there" -- don't
+        // hide it, it might be a real problem (e.g. a permissions issue on
+        // the socket path).
+        println!("{}", paint.dim(&err.to_string()));
+        println!();
+    }
+    println!("start it with: {}", paint.bold("hyperwm daemon start"));
+    ExitCode::FAILURE
+}
+
+/// Prints every config path `hyperwm` considers by default (roadmap: "show
+/// which config file(s) were found/considered, not just the one that was
+/// loaded"), marking whichever one is actually in play:
+/// - `loaded_path: Some(path)` -- a running daemon reported the config path
+///   it actually loaded (`StatusReport::config_path`); that candidate is
+///   marked "(loaded)".
+/// - `loaded_path: None` -- no daemon is running, so nothing has "loaded" a
+///   config yet; the first *existing* candidate is marked "(would be
+///   used)", matching `hyperwm_config::default_config_path`'s own lookup
+///   order.
+fn print_config_section(paint: &color::Painter, loaded_path: Option<&str>) {
+    let Some(candidates) = hyperwm_config::config_candidates() else {
+        println!(
+            "config: {}",
+            paint.dim("$HOME is not set -- can't locate a default config file")
+        );
+        return;
+    };
+
+    println!("config:");
+    let mut marked = false;
+    for candidate in &candidates {
+        let path = candidate.path.display().to_string();
+        let is_active = match loaded_path {
+            Some(loaded) => loaded == path,
+            None => !marked && candidate.exists,
+        };
+        if is_active {
+            marked = true;
+            let label = if loaded_path.is_some() { "loaded" } else { "would be used" };
+            println!("  {} {path} {}", paint.green("*"), paint.dim(&format!("({label})")));
+        } else if candidate.exists {
+            println!("  {} {path}", paint.dim("-"));
+        } else {
+            println!("  {} {path} {}", paint.dim("-"), paint.dim("(not found)"));
+        }
+    }
+    if !marked {
+        match loaded_path {
+            // Only possible if the daemon's loaded config path doesn't
+            // match either default candidate -- can't happen today since
+            // hyperwm-daemon only ever loads `default_config_path()`, but
+            // report what it actually loaded rather than silently dropping
+            // it if that ever changes.
+            Some(loaded) => println!("  {} {loaded} {}", paint.green("*"), paint.dim("(loaded)")),
+            None => println!("  {}", paint.red("no config file found at any of the above")),
+        }
+    }
+}
+
+fn print_window_section(paint: &color::Painter, label: &str, color_code: &str, windows: &[WindowSummary]) {
+    println!("{}", paint.bold(&format!("{label} ({}):", windows.len())));
+    if windows.is_empty() {
+        println!("  {}", paint.dim("(none)"));
+        return;
+    }
+    for window in windows {
+        println!("  {} {}", paint.colorize(color_code, "\u{25cf}"), window_line(paint, window));
+    }
+}
+
+fn window_line(paint: &color::Painter, window: &WindowSummary) -> String {
     let rect = &window.rect;
-    println!(
-        "  {} \u{2014} \"{}\" [{:.0}, {:.0}, {:.0}x{:.0}]",
-        window.app, window.title, rect.x, rect.y, rect.width, rect.height
-    );
+    format!(
+        "{} \u{2014} \"{}\" [{:.0}, {:.0}, {:.0}x{:.0}]",
+        paint.bold(&window.app),
+        window.title,
+        rect.x,
+        rect.y,
+        rect.width,
+        rect.height
+    )
 }
 
 /// `hyperwm verify [--config <path>]` (architecture.md §5's script checks

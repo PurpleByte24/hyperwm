@@ -97,16 +97,36 @@ pub fn load(path: &Path) -> Result<Config, ConfigError> {
 /// order documented at the top of examples/config.toml.
 #[must_use]
 pub fn default_config_path() -> Option<PathBuf> {
+    config_candidates()?.into_iter().find(|c| c.exists).map(|c| c.path)
+}
+
+/// One config path [`default_config_path`] considers, annotated with
+/// whether it currently exists on disk.
+#[derive(Debug, Clone)]
+pub struct ConfigCandidate {
+    pub path: PathBuf,
+    pub exists: bool,
+}
+
+/// Every path [`default_config_path`] considers, in the same lookup order,
+/// each annotated with whether it currently exists -- unlike
+/// `default_config_path`, which only reports the one that "won". Used by
+/// `hyperwm status` to show which config file(s) were found/considered,
+/// not just the one that was loaded. `None` if `$HOME` isn't set (matches
+/// `default_config_path`'s own bail-out).
+#[must_use]
+pub fn config_candidates() -> Option<Vec<ConfigCandidate>> {
     let home = std::env::var_os("HOME")?;
     let home = PathBuf::from(home);
 
-    let preferred = home.join(".config/hyperwm/config.toml");
-    if preferred.is_file() {
-        return Some(preferred);
-    }
-    let fallback = home.join(".hyperwm/config.toml");
-    if fallback.is_file() {
-        return Some(fallback);
-    }
-    None
+    Some(
+        [".config/hyperwm/config.toml", ".hyperwm/config.toml"]
+            .into_iter()
+            .map(|rel| {
+                let path = home.join(rel);
+                let exists = path.is_file();
+                ConfigCandidate { path, exists }
+            })
+            .collect(),
+    )
 }
